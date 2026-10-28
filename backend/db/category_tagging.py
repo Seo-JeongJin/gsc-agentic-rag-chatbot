@@ -19,10 +19,14 @@ main.py의 POST /api/ask가 사용자에게 응답을 반환한 "다음에" back
 그래서 대시보드의 unclassified_count(NULL 개수) = "태깅 기능 도입 전 과거 질문 + 분류 호출 실패 건".
 """
 
+import llm_client
 from db.connection import get_pool
 
 FALLBACK_MAJOR = "기타"
 FALLBACK_MINOR = "기타"
+
+# LLM이 답 앞뒤에 붙이기 쉬운 장식 — 목록 기호(- * •), 따옴표, 굵게 표시(**), 백틱, 끝 마침표
+_DECORATION_CHARS = "-*•\"'`“”‘’. "
 
 
 async def _fetch_all_categories() -> list[tuple[str, str]]:
@@ -59,11 +63,16 @@ def _extract_question_section(prompt: str) -> str:
 
 
 async def generate_category_llm_call(prompt: str) -> str:
-    """
-    ⚠️ 가짜 LLM 호출 — agent_loop.py/analysis_service.py와 같은 이유로 가짜(GPU서버가 교내망
-    전용이라 집에서 연결 불가). 실제로는 위 프롬프트 하나를 vLLM에 단발성으로 보내면 됨.
+    """분류 LLM 호출 — llm_client.complete(단발성, 생각모드 끔)로 보냄. LLM_MODE=mock이면 아래 가짜 응답을 씀.
+    이 함수 이름을 그대로 둔 이유: 테스트가 이 함수를 바꿔치기해서 "LLM이 이렇게 고르면?"을 흉내 내기 때문."""
+    return await llm_client.complete(prompt, mock=_mock_category_response)
 
-    지금은 질문 텍스트에 포함된 키워드로 비슷한 카테고리를 대충 골라서, "LLM 응답 파싱 →
+
+async def _mock_category_response(prompt: str) -> str:
+    """
+    ⚠️ 가짜 LLM 응답 — LLM_MODE=mock(집 개발용)일 때만 씀.
+
+    질문 텍스트에 포함된 키워드로 비슷한 카테고리를 대충 골라서, "LLM 응답 파싱 →
     유효성 검증 → categories.id 매핑 → questions 업데이트"로 이어지는 코드 쪽 로직이
     실제로 맞게 동작하는지 테스트할 수 있게만 해둠(실제 분류 판단 로직 아님).
     키워드가 하나도 안 걸리면 일부러 목록에 없는 값을 반환해서 기타>기타 폴백 경로를 테스트.
@@ -89,10 +98,17 @@ async def generate_category_llm_call(prompt: str) -> str:
 
 def _parse_category_response(raw: str, categories: list[tuple[str, str]]) -> tuple[str, str]:
     """"대분류 > 소분류" 형식을 파싱해서 실제 categories 목록에 있는 값인지 확인.
-    형식이 깨졌거나 목록에 없는 값이면 기타>기타로 폴백."""
-    if ">" in raw:
-        major, _, minor = raw.partition(">")
-        major, minor = major.strip(), minor.strip()
+    형식이 깨졌거나 목록에 없는 값이면 기타>기타로 폴백.
+
+    실제 LLM의 흔한 변형을 허용(2026-10-28 리뷰 2번): 줄마다 ">"가 있는 줄을 찾아서, 앞뒤 장식(목록 기호 "- ",
+    따옴표, **굵게**, 끝 마침표)을 걷어낸 뒤 목록과 대조함. 프롬프트가 목록을 "- 대분류 > 소분류"로 보여줘서
+    LLM이 "- "까지 따라 쓰기 쉬움 — 전엔 이 경우 "- 입학전형"을 대분류로 읽어 전부 기타로 갔음.
+    검증 기준은 그대로 "categories 목록에 정확히 있는 값만" — 허용하는 건 장식뿐이고 이름 자체를 추측하진 않음."""
+    for line in raw.splitlines():
+        if ">" not in line:
+            continue
+        major, _, minor = line.partition(">")
+        major, minor = major.strip(_DECORATION_CHARS), minor.strip(_DECORATION_CHARS)
         if (major, minor) in categories:
             return major, minor
     return FALLBACK_MAJOR, FALLBACK_MINOR

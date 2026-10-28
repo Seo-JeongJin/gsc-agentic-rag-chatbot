@@ -20,6 +20,10 @@ from db.batch_analysis import (
     run_category_suggestion,
 )
 from db.category_tagging import retag_etc_questions
+from llm_client import LLMError
+
+# LLM 서버 실패 시 관리자 화면에 보여줄 안내 — 우리 코드 버그(500)가 아니라 "LLM 서버가 응답하지 않음"(502)이라는 뜻
+LLM_FAILURE_DETAIL = "LLM 서버가 응답하지 않아 분석하지 못했습니다. 잠시 후 다시 시도해 주세요."
 from db.dashboard_service import get_category_stats, get_overview_stats, get_questions
 
 router = APIRouter(prefix="/admin")
@@ -116,8 +120,12 @@ async def overview_stats_endpoint(_admin_id: int = Depends(require_admin)) -> di
 async def analyze_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
     """"로그 분석하기" 버튼이 호출. 지난 분석 이후 새로 생긴 "답변 못한 질문"이 있을 때만
     LLM을 호출해서 결과를 dashboard_insights에 새 행으로 저장하고, 없으면 LLM을 부르지 않고
-    기존 결과를 cached=true로 그대로 돌려줌. 과거 분석 결과는 지워지지 않고 이력으로 남음."""
-    return await run_analysis()
+    기존 결과를 cached=true로 그대로 돌려줌. 과거 분석 결과는 지워지지 않고 이력으로 남음.
+    LLM 서버가 실패하면 502(아무것도 저장 안 됨 — 다시 누르면 같은 질문들로 재시도)."""
+    try:
+        return await run_analysis()
+    except LLMError as e:
+        raise HTTPException(status_code=502, detail=LLM_FAILURE_DETAIL) from e
 
 
 @router.get("/insights")
@@ -143,8 +151,11 @@ async def insight_history_endpoint(
 @router.post("/category-suggestions/analyze")
 async def category_suggestions_analyze_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
     """"카테고리 제안 확인하기" 버튼이 호출. 기타로 분류된 질문이 너무 적으면 LLM 호출
-    자체를 안 하고 바로 반환(run_category_suggestion 내부의 임계치 체크)."""
-    return await run_category_suggestion()
+    자체를 안 하고 바로 반환(run_category_suggestion 내부의 임계치 체크). LLM 서버가 실패하면 502."""
+    try:
+        return await run_category_suggestion()
+    except LLMError as e:
+        raise HTTPException(status_code=502, detail=LLM_FAILURE_DETAIL) from e
 
 
 @router.get("/category-suggestions")

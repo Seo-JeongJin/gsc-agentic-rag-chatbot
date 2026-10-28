@@ -16,6 +16,7 @@ admin_api.py가 백그라운드로 호출) — 원래 질문들이 계속 기타
 
 import re
 
+import llm_client
 from db.connection import get_pool
 
 MIN_FOR_SUGGESTION = 5
@@ -60,11 +61,15 @@ def _build_cluster_prompt(questions: list[dict]) -> str:
 
 
 async def generate_cluster_llm_call(prompt: str) -> str:
-    """
-    ⚠️ 가짜 LLM 호출 — agent_loop.py와 같은 이유로 가짜(GPU서버가 교내망 전용이라
-    집에서 연결 불가). 실제로는 위 프롬프트를 vLLM에 단발성으로 보내면 됨.
+    """카테고리 제안 LLM 호출 — llm_client.complete(단발성, 생각모드 끔)로 보냄. LLM_MODE=mock이면 아래 가짜 응답을 씀."""
+    return await llm_client.complete(prompt, mock=_mock_cluster_response)
 
-    지금은 질문 목록에 "포트폴리오" 키워드가 과반 이상 나오면 패턴이 있는 척(그 질문들의 번호를
+
+async def _mock_cluster_response(prompt: str) -> str:
+    """
+    ⚠️ 가짜 LLM 응답 — LLM_MODE=mock(집 개발용)일 때만 씀.
+
+    질문 목록에 "포트폴리오" 키워드가 과반 이상 나오면 패턴이 있는 척(그 질문들의 번호를
     "관련 질문"으로 같이 돌려줌), 아니면(쓰레기/제각각이면) "패턴 없음"으로 응답 — 실제 분류 판단이
     아니라 "LLM 응답 파싱 → 번호 검증 → 중복확인 → category_proposals 저장"으로 이어지는 코드 쪽
     로직을 테스트하기 위한 용도.
@@ -82,6 +87,15 @@ async def generate_cluster_llm_call(prompt: str) -> str:
     return "제안: 없음"
 
 
+def _normalize_line(line: str) -> str:
+    """LLM 응답 한 줄의 장식을 걷어냄: 굵게/기울임(*), 백틱, 제목 기호(#), 앞의 목록 기호("- "),
+    "키 : 값"의 콜론 앞뒤 공백 → "키: 값". 내용(카테고리 이름, 번호)은 건드리지 않음."""
+    line = line.replace("*", "").replace("`", "").strip().lstrip("#").strip()
+    if line.startswith("- "):
+        line = line[2:]
+    return re.sub(r"^([가-힣 ]+?)\s*:\s*", r"\1: ", line).strip()
+
+
 def _parse_cluster_response(raw: str, question_count: int) -> dict | None:
     """LLM 응답에서 제안 내용을 뽑아냄. 제안할 게 없거나 형식이 불완전하면 None.
 
@@ -90,8 +104,13 @@ def _parse_cluster_response(raw: str, question_count: int) -> dict | None:
     (주제와 무관한 "날씨" 질문이 섞임)로 저장됐음. 이제 LLM이 고른 번호로 실제 건수와 샘플을 만듦.
 
     번호 검증(코드 담당): 목록 범위(1~question_count) 밖이거나 중복된 번호는 버림. 유효한 번호가
-    하나도 없으면 LLM의 판단 근거를 확인할 수 없으므로 제안하지 않음(None)."""
-    lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
+    하나도 없으면 LLM의 판단 근거를 확인할 수 없으므로 제안하지 않음(None).
+
+    실제 LLM의 흔한 변형 허용(2026-10-28 리뷰 2번): "**제안**: 있음"(굵게 표시), "카테고리 : …"(콜론 앞 공백) 등을
+    _normalize_line으로 정리한 뒤 읽음. 전엔 첫 줄이 정확히 "제안: 있음"이어야만 인식해서 이런 응답은 전부
+    조용히 "패턴 없음"이 됐음."""
+    lines = [_normalize_line(line) for line in raw.strip().splitlines() if line.strip()]
+    lines = [line for line in lines if line]
     if not lines or lines[0] != "제안: 있음":
         return None
 

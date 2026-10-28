@@ -97,3 +97,21 @@ async def test_analyze_processes_backlog_oldest_first_without_skipping(admin_cli
 
     third = (await admin_client.post("/admin/analyze")).json()
     assert third["cached"] is True                      # 이제 정말 다 봤음
+
+
+async def test_analyze_returns_502_when_llm_fails(admin_client, db, monkeypatch):
+    """LLM 서버가 실패하면 "로그 분석하기"는 500이 아니라 502(LLM 서버 문제)로 응답하고, 아무것도 저장하지 않아야 함
+    — 그래야 다음에 다시 눌렀을 때 같은 질문들로 정상 재시도됨(리뷰 2번, 4단계)."""
+    import db.analysis_service as analysis_service
+    import llm_client
+
+    async def failing_llm(prompt):
+        raise llm_client.LLMError("GPU 서버 응답 없음")
+
+    monkeypatch.setattr(analysis_service, "generate_summary_llm_call", failing_llm)
+    await insert_question(db, "실패1", needs_review=True, review_reason="insufficient_info")
+
+    res = await admin_client.post("/admin/analyze")
+
+    assert res.status_code == 502
+    assert await db.fetchval("SELECT COUNT(*) FROM dashboard_insights") == 0

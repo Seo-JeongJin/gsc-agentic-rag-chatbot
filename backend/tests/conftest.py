@@ -11,6 +11,13 @@ import guardrail
 
 
 @pytest.fixture(autouse=True)
+def force_mock_llm(monkeypatch):
+    """모든 테스트에서 LLM은 항상 mock 모드 — .env에 LLM_MODE=vllm이 들어 있는 컴퓨터(학과 컴퓨터 등)에서
+    테스트를 돌려도 실제 GPU 서버를 부르지 않게. 실제 vLLM 요청 형식은 test_llm_client.py가 가짜 네트워크로 따로 확인함."""
+    monkeypatch.setenv("LLM_MODE", "mock")
+
+
+@pytest.fixture(autouse=True)
 def reset_guardrail_state():
     """매 테스트마다 입력 가드레일의 메모리 기록(rate limit 횟수·마지막 질문)을 초기화.
     가드레일은 모듈 전역 dict에 기록을 쌓기 때문에, 안 비우면 앞 테스트의 요청이 뒤 테스트의

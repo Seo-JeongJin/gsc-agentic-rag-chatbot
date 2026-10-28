@@ -12,6 +12,7 @@ LLM에게 설명하게 함 — 매번 전체를 처음부터 다시 요약하는
 재사용하지 않고 이 파일 안에 따로 가벼운 버전을 둠.
 """
 
+import llm_client
 from db.connection import get_pool
 
 INSIGHT_TYPE = "failed_answers_summary"
@@ -112,12 +113,14 @@ def _build_trend_prompt(previous_summary: str, new_questions: list[dict]) -> str
 
 
 async def generate_summary_llm_call(prompt: str) -> str:
-    """
-    ⚠️ 가짜 LLM 호출 — agent_loop.py의 generate_llm_response()와 마찬가지로, GPU 서버가
-    교내망 전용이라 지금은 실제 호출이 불가능해서 임시로 고정 응답을 돌려줌.
-    실제로는 vLLM에 이 prompt 하나만 담아 단발성 요청(도구 없음, 스트리밍 불필요)을 보내면 됨.
-    """
-    return "(가짜 분석 결과) 아직 실제 vLLM 연결 전이라 고정 텍스트입니다. 연결 후 이 함수 내부만 교체하면 됩니다."
+    """요약 LLM 호출 — llm_client.complete(단발성, 도구 없음, 생각모드 끔)로 보냄. LLM_MODE=mock이면 아래 가짜 응답을 씀."""
+    return await llm_client.complete(prompt, mock=_mock_summary_response)
+
+
+async def _mock_summary_response(prompt: str) -> str:
+    """⚠️ 가짜 LLM 응답 — LLM_MODE=mock(집 개발용)일 때만 씀. 고정 텍스트라 요약 품질이 아니라
+    "조회 → 프롬프트 → 저장 → 캐시 판단" 흐름을 확인하는 용도."""
+    return "(가짜 분석 결과) LLM_MODE=mock이라 고정 텍스트입니다. 실제 요약은 LLM_MODE=vllm에서 나옵니다."
 
 
 async def _save_insight(

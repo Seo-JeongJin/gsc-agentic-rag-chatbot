@@ -78,3 +78,37 @@ def test_cluster_proposal_without_valid_numbers_returns_none():
     """"있음"이라면서 관련 질문 번호가 없거나 전부 범위 밖이면 근거를 확인할 수 없으므로 제안하지 않음(None)."""
     raw = "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n관련 질문: 없음\n이유: 반복됨"
     assert _parse_cluster_response(raw, question_count=5) is None
+
+
+# ----- 리뷰 2번: 실제 LLM이 형식을 살짝 벗어나게 답하는 경우 (2026-10-28 4단계) -----
+# (<think> 블록은 llm_client.strip_thinking이 파서에 넘기기 전에 지움 — test_llm_client.py에서 확인)
+
+
+def test_category_with_list_dash_prefix():
+    """[2번 버그 재현] 프롬프트가 카테고리 목록을 "- 입학전형 > 지원자격"처럼 보여주기 때문에, 실제 LLM은
+    앞의 "- "까지 따라 쓰기 쉬움. 수정 전엔 "- 입학전형"을 대분류로 읽어서 목록에 없다고 기타로 폴백했음."""
+    assert _parse_category_response("- 입학전형 > 지원자격", CATEGORIES) == ("입학전형", "지원자격")
+
+
+def test_category_with_quotes_or_markdown():
+    """따옴표·굵게 표시(**)·끝의 마침표가 붙어도 같은 카테고리로 인식."""
+    assert _parse_category_response('"캠퍼스생활·비용 > 기숙사"', CATEGORIES) == ("캠퍼스생활·비용", "기숙사")
+    assert _parse_category_response("**캠퍼스생활·비용 > 기숙사**.", CATEGORIES) == ("캠퍼스생활·비용", "기숙사")
+
+
+def test_category_with_extra_explanation_line():
+    """"다른 말 덧붙이지 말라"고 해도 설명을 한 줄 붙이는 경우 — 목록에 있는 값이 들어 있는 줄을 찾아서 씀."""
+    raw = "질문 내용을 보면 기숙사 관련입니다.\n캠퍼스생활·비용 > 기숙사"
+    assert _parse_category_response(raw, CATEGORIES) == ("캠퍼스생활·비용", "기숙사")
+
+
+def test_cluster_with_markdown_and_spaced_colons():
+    """[2번 버그 재현] 실제 LLM은 "**제안**: 있음", "카테고리 : …"처럼 굵게 표시나 콜론 앞 공백을 섞기 쉬움.
+    수정 전엔 첫 줄이 정확히 "제안: 있음"이어야만 인식해서, 이런 응답은 전부 "패턴 없음"으로 조용히 버려졌음."""
+    raw = "**제안**: 있음\n**카테고리** : 학과소개 > 포트폴리오 제출\n관련 질문 : 1, 2\n이유: 반복됨"
+    assert _parse_cluster_response(raw, question_count=3) == {
+        "major": "학과소개",
+        "minor": "포트폴리오 제출",
+        "reason": "반복됨",
+        "question_numbers": [1, 2],
+    }
