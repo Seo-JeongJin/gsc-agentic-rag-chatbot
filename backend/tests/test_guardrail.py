@@ -3,25 +3,13 @@
 
 규칙 하나하나가 막아야 할 걸 막고, 정상 질문은 통과시키는지 확인.
 rate limit/중복요청 체크는 모듈 전역 dict에 상태를 쌓기 때문에, 테스트끼리 서로 영향을
-주지 않도록 매 테스트 전후로 비워줌(reset_guardrail_state).
+주지 않도록 매 테스트 전후로 비워줌 — tests/conftest.py의 reset_guardrail_state(autouse)가 담당.
 """
 
 import pytest
 
 import guardrail
 from guardrail import check_input
-
-
-@pytest.fixture(autouse=True)
-def reset_guardrail_state():
-    """매 테스트마다 rate limit 기록·마지막 질문 기록을 초기화.
-    이게 없으면 앞 테스트에서 보낸 요청이 뒤 테스트의 rate limit 횟수에 섞여서,
-    테스트 실행 순서에 따라 결과가 달라지는 불안정한 테스트가 됨."""
-    guardrail._request_timestamps.clear()
-    guardrail._last_question.clear()
-    yield
-    guardrail._request_timestamps.clear()
-    guardrail._last_question.clear()
 
 
 def test_normal_question_passes():
