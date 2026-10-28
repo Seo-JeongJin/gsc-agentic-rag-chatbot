@@ -49,7 +49,7 @@ CREATE INDEX documents_tsv_idx ON documents USING gin (content_tsv);            
 CREATE TABLE categories (
   id          SERIAL PRIMARY KEY,
   major       TEXT NOT NULL,                      -- 대분류 이름 (예: "입학전형").
-  minor       TEXT NOT NULL,                       -- 소분류 이름 (예: "수시모집").
+  minor       TEXT NOT NULL,                       -- 소분류 이름 (예: "지원자격").
   is_approved BOOLEAN NOT NULL DEFAULT TRUE,        -- 지금 이 카테고리가 활성 상태인지. 완전히 지우는 대신 이 플래그로 비활성화 — 과거에 이 카테고리로 태깅된 질문들의 기록은 보존하면서 새로 쓰는 것만 막을 수 있음.
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (major, minor)                            -- 같은 대/소분류 조합이 실수로 중복 생성되는 것 방지.
@@ -93,7 +93,7 @@ CREATE INDEX questions_session_idx ON questions (session_id, created_at DESC);  
 
 -- =========================================================
 -- 5. category_proposals — "아직 카테고리로 확정 안 된 후보"를 담는 테이블
--- T6 주간 배치가 "기타"로 분류된 질문들을 클러스터링해서, 충분히 모이면 새 카테고리로 제안하는 결과물.
+-- T6(관리자의 "카테고리 제안 확인하기" 버튼, batch_analysis.py)가 "기타"로 분류된 질문들을 LLM에게 보여주고, 반복되는 주제가 있으면 새 카테고리로 제안하는 결과물.
 -- 시스템이 마음대로 카테고리를 만들면 안 되고 반드시 관리자 승인을 거쳐야 하므로 별도 테이블로 분리.
 -- 승인되면 categories 테이블에 정식으로 행이 추가됨(한 트랜잭션으로 상태 변경까지 같이 처리).
 -- =========================================================

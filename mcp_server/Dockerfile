@@ -9,9 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 참고: BGE-M3 모델 가중치는 지금 빌드 시점에 미리 받아두지 않음 — 컨테이너가 처음 실행될 때
-# (최초 검색 요청 시) 다운로드함. 매번 컨테이너를 새로 만들면 매번 다시 받아야 하니,
-# 나중에 모델 캐시를 볼륨으로 마운트해서 재사용하는 걸 고려할 것(docker-compose.yml 참고).
+# 참고: BGE-M3 모델 가중치는 빌드 시점에 미리 받아두지 않음 — 컨테이너가 처음 실행될 때
+# (최초 검색 요청 시) 다운로드함. 다운로드한 모델은 docker-compose.yml의 hf_cache 볼륨에
+# 저장되므로, 컨테이너를 새로 만들어도 다시 받지 않음.
 EXPOSE 9000
 ENV MCP_SERVER_HOST=0.0.0.0
 CMD ["python3", "mcp_server.py"]

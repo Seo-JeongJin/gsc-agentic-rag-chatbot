@@ -1,5 +1,5 @@
 """
-세션 처리 — agent_loop의 2번 단계에서 호출.
+세션 처리 — main.py의 /api/ask 2번 단계에서 호출.
 
 session_id가 sessions 테이블에 이미 있으면 재방문(is_returning=TRUE)으로 갱신,
 없으면 새로 추가. session_id당 정확히 1행만 존재하게 유지(upsert).

@@ -1,6 +1,7 @@
 """
 관리자 대시보드용 조회 전용 함수들 — 전부 순수 DB 집계/조회이고 LLM 호출이 전혀 없음.
-(LLM을 부르는 "로그 분석하기" 기능은 이 파일이 아니라 나중에 따로 만들 예정)
+(LLM을 부르는 기능은 이 파일이 아니라 따로 있음: "로그 분석하기"는 analysis_service.py,
+"카테고리 제안"은 batch_analysis.py)
 """
 
 from db.connection import get_pool
@@ -68,8 +69,10 @@ async def get_overview_stats() -> dict:
     """
     요약 통계 한 번에 — 세션/재방문율, 사용자평가, 미분류 질문, 답변못한질문(이유별).
 
-    참고: unclassified_count(미분류 질문 수)는 category_tagging.py가 아직 없어서
-    지금은 항상 전체 질문 수와 같게 나옴(전부 미분류 상태) — 버그 아니라 예상된 결과.
+    참고: unclassified_count(미분류 = category_id가 NULL인 질문 수)는 "카테고리 태깅 기능이
+    생기기 전(2026-10-27 이전)에 쌓인 과거 질문 + 분류 LLM 호출이 실패한 질문"을 뜻함.
+    분류는 됐는데 맞는 칸이 없는 질문은 NULL이 아니라 기타>기타로 들어가므로 여기 안 잡힘
+    (category_tagging.py 상단 설명 참고).
     """
     pool = await get_pool()
     async with pool.acquire() as conn:

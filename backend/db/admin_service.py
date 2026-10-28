@@ -36,7 +36,7 @@ async def create_admin(username: str, password: str) -> None:
 async def login(username: str, password: str) -> str | None:
     """
     아이디/비밀번호가 맞으면 새 세션 토큰을 발급(admin_sessions에 저장)하고 그 토큰을 반환.
-    틀리면 None 반환 — 호출하는 쪽(main.py)이 401로 응답하게 됨.
+    틀리면 None 반환 — 호출하는 쪽(admin_api.py의 login_endpoint)이 401로 응답하게 됨.
 
     주의: 아이디가 존재하지 않는 경우와 비밀번호가 틀린 경우를 구분해서 에러 메시지를 다르게 주면
     "이 아이디는 존재한다"는 정보가 새어나갈 수 있어서, 두 경우 모두 그냥 None으로 동일하게 처리.
@@ -66,7 +66,7 @@ async def login(username: str, password: str) -> str | None:
 
 async def verify_session(session_token: str | None) -> int | None:
     """토큰이 유효(존재 + 만료 전)하면 admin_id를 반환, 아니면 None.
-    main.py의 require_admin 디펜던시가 매 /admin/* 요청마다 이걸 호출해서 인증을 확인함."""
+    admin_api.py의 require_admin 디펜던시가 매 /admin/* 요청마다 이걸 호출해서 인증을 확인함."""
     if not session_token:
         return None
 

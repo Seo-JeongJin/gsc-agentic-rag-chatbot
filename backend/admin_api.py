@@ -1,5 +1,5 @@
 """
-관리자 대시보드용 API 라우터 — 로그인/로그아웃 + (앞으로 추가될) 대시보드 조회 엔드포인트.
+관리자 대시보드용 API 라우터 — 로그인/로그아웃, 대시보드 조회, 로그 분석, 카테고리 제안 엔드포인트.
 
 main.py에 직접 다 적지 않고 별도 파일로 분리한 이유: main.py는 "사용자용 챗봇 요청 처리"라는
 하나의 책임만 갖고, 관리자 쪽은 완전히 다른 책임(인증, 통계조회)이라 섞으면 파일이 커지고
@@ -95,14 +95,16 @@ async def questions_endpoint(
 
 @router.get("/stats/categories")
 async def category_stats_endpoint(_admin_id: int = Depends(require_admin)) -> list[dict]:
-    """카테고리(대/소분류)별 질문 수 집계 — 분류된 질문만 대상."""
+    """카테고리(대/소분류)별 질문 수 집계 — categories 테이블 전체 기준이라 질문이 0건인
+    카테고리도 빠짐없이 나옴(관리자가 카테고리 제안 승인/거절 시 지금 어떤 카테고리가 있는지
+    전체를 봐야 해서). 미분류(NULL) 질문 수는 여기가 아니라 /stats/overview에 있음."""
     return await get_category_stats()
 
 
 @router.get("/stats/overview")
 async def overview_stats_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
     """세션/재방문율, 사용자평가, 미분류질문, 답변못한질문 — 요약 통계 한 번에.
-    주의: 미분류 질문 수는 category_tagging.py가 아직 없어서 지금은 전체 질문 수와 같게 나옴."""
+    미분류 질문 수의 의미는 db/dashboard_service.py의 get_overview_stats 설명 참고."""
     return await get_overview_stats()
 
 
@@ -111,8 +113,9 @@ async def overview_stats_endpoint(_admin_id: int = Depends(require_admin)) -> di
 
 @router.post("/analyze")
 async def analyze_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
-    """"로그 분석하기" 버튼이 호출. 이 호출 한 번마다 LLM이 새로 호출되고, 결과가
-    dashboard_insights에 새 행으로 저장됨 — 과거 분석 결과는 지워지지 않고 이력으로 남음."""
+    """"로그 분석하기" 버튼이 호출. 지난 분석 이후 새로 생긴 "답변 못한 질문"이 있을 때만
+    LLM을 호출해서 결과를 dashboard_insights에 새 행으로 저장하고, 없으면 LLM을 부르지 않고
+    기존 결과를 cached=true로 그대로 돌려줌. 과거 분석 결과는 지워지지 않고 이력으로 남음."""
     return await run_analysis()
 
 
