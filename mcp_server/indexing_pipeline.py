@@ -16,29 +16,26 @@ async def index_document(source: str, full_text: str) -> int:
     """
     source(문서를 구분하는 이름)와 전체 마크다운 텍스트를 받아 청크로 쪼개고 색인.
 
-    같은 source로 다시 호출하면(문서 수정 후 재색인) ON CONFLICT로 기존 청크를 덮어씀 —
-    documents 테이블의 UNIQUE(source, chunk_index) 제약 덕분에 중복 생성 없이 안전하게 갱신됨.
+    같은 source로 다시 호출하면(문서 수정 후 재색인, 또는 임베딩 모델 교체 후 재색인) 그 source의
+    기존 청크를 **전부 지우고 새로 넣음** — 한 트랜잭션이라 중간에 실패하면 지운 것도 취소되어 원래 상태로 돌아감.
+    (2026-10-28 리뷰 17번: 전엔 ON CONFLICT로 "같은 번호 청크만 덮어쓰기"라서, 문서가 줄어들면
+    없어진 청크가 옛 내용 그대로 남아 계속 검색됐음.) 다른 source의 청크는 건드리지 않음.
+
+    임베딩을 트랜잭션 "밖"에서 먼저 다 계산하는 이유: 임베딩은 오래 걸리는데(CPU면 청크당 수백 ms),
+    그동안 트랜잭션을 열어두면 검색 쪽이 이 문서의 청크를 못 보는 시간이 길어짐. DB 작업만 짧게 묶음.
 
     반환값: 몇 개의 청크가 저장됐는지.
     """
-    pool = await get_pool()
     chunks = split_markdown_into_chunks(full_text)
+    vectors = [embed(chunk_text) for chunk_text in chunks]
 
+    pool = await get_pool()
     async with pool.acquire() as conn:
-        for chunk_index, chunk_text in enumerate(chunks):
-            vector = embed(chunk_text)
-            await conn.execute(
-                """
-                INSERT INTO documents (source, chunk_index, chunk_text, embedding)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (source, chunk_index) DO UPDATE
-                SET chunk_text = EXCLUDED.chunk_text,
-                    embedding = EXCLUDED.embedding
-                """,
-                source,
-                chunk_index,
-                chunk_text,
-                vector,
+        async with conn.transaction():
+            await conn.execute("DELETE FROM documents WHERE source = $1", source)
+            await conn.executemany(
+                "INSERT INTO documents (source, chunk_index, chunk_text, embedding) VALUES ($1, $2, $3, $4)",
+                [(source, i, text, vector) for i, (text, vector) in enumerate(zip(chunks, vectors))],
             )
 
     return len(chunks)

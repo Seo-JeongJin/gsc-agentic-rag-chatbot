@@ -20,6 +20,8 @@ import re
 MAX_SECTION_LENGTH = 1200  # 제목 단위로 나눈 섹션이 이보다 길면 추가로 쪼갬(표는 쪼개지 않음)
 
 HEADING_PATTERN = re.compile(r"^(#{2,3})\s+(.+)$", re.MULTILINE)
+TITLE_PATTERN = re.compile(r"^#\s+(.+)$", re.MULTILINE)  # 문서 맨 위의 "# 문서제목" (## 아님)
+DEFAULT_PREAMBLE_TITLE = "문서 개요"  # "# 제목"이 없는 문서의 머리말 섹션 이름
 QA_SPLIT_PATTERN = re.compile(r"(?=\*\*Q\.)")  # **Q. 로 시작하는 지점마다 쪼갬
 
 # 이 문구가 제목에 포함된 섹션은 "검색용 문서"가 아니라 "챗봇 행동지침"으로 취급.
@@ -27,10 +29,23 @@ META_INSTRUCTION_MARKER = "유의사항"
 
 
 def _split_by_headings(markdown_text: str) -> list[tuple[str, str]]:
-    """##/### 제목 경계로 (제목경로, 본문) 리스트로 분리."""
+    """##/### 제목 경계로 (제목경로, 본문) 리스트로 분리.
+
+    첫 ## 제목 앞의 본문(머리말)도 하나의 섹션으로 포함함 — 섹션 이름은 문서의 "# 제목"(없으면 "문서 개요").
+    (2026-10-28 리뷰 17번: 전엔 ## 제목 사이의 본문만 잘라서, 문서 맨 앞 소개글이나 ## 제목이 아예 없는
+    문서는 통째로 색인에서 빠졌음.)"""
     matches = list(HEADING_PATTERN.finditer(markdown_text))
     sections = []
     h2_title = ""
+
+    # 머리말: 문서 시작 ~ 첫 ## 제목 직전(## 제목이 하나도 없으면 문서 전체). "# 제목" 줄 자체는 본문에서 뺌.
+    preamble_end = matches[0].start() if matches else len(markdown_text)
+    preamble = markdown_text[:preamble_end]
+    title_match = TITLE_PATTERN.search(preamble)
+    preamble_title = title_match.group(1).strip() if title_match else DEFAULT_PREAMBLE_TITLE
+    preamble_body = TITLE_PATTERN.sub("", preamble).strip()
+    if preamble_body:
+        sections.append((preamble_title, preamble_body))
 
     for i, match in enumerate(matches):
         level, title = match.group(1), match.group(2).strip()

@@ -69,3 +69,14 @@ def test_long_section_splits_by_paragraph_but_keeps_table_whole():
     assert len(chunks) == 3
     assert chunks[1] == f"[긴 섹션]\n{TABLE}"
     assert all(c.startswith("[긴 섹션]\n") for c in chunks)
+
+
+def test_text_before_first_section_is_kept():
+    """[17번 버그 재현] 첫 ## 제목 앞에 있는 본문(문서 소개 등)도 검색 청크로 남아야 함.
+    수정 전엔 ## 제목 사이의 본문만 잘라내서, 맨 앞부분은 통째로 버려졌음. 섹션 이름은 문서의 # 제목을 씀."""
+    doc = "# 글로벌시스템융합과 안내\n\n본 문서는 입학 안내 자료입니다.\n\n## 1. 학과 소개\n소개 내용."
+
+    chunks = split_markdown_into_chunks(doc)
+
+    assert chunks[0] == "[글로벌시스템융합과 안내]\n본 문서는 입학 안내 자료입니다."
+    assert chunks[1] == "[1. 학과 소개]\n소개 내용."
