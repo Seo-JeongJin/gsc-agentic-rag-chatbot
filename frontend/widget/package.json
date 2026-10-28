@@ -1,0 +1,11 @@
+{
+  "name": "gsc-chat-widget",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --minify --outfile=dist/widget.js",
+    "build:dev": "esbuild src/index.js --bundle --outfile=dist/widget.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

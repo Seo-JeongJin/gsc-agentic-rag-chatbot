@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>위젯 삽입 테스트 — 학과 홈페이지 흉내</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#fff;color:#0B1626;}
+  .hero{background:#fff;border-bottom:1px solid #E3E8F0;padding:48px 20px;text-align:center;}
+  .hero h1{color:#0B1626;margin:0 0 10px;}
+  .hero p{color:#5B6472;max-width:480px;margin:0 auto;}
+  .body{max-width:640px;margin:0 auto;padding:30px 20px;color:#5B6472;line-height:1.6;}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <h1>영진전문대학교 글로벌시스템융합과</h1>
+    <p>이 페이지는 위젯이 실제 학과 홈페이지에 삽입됐을 때처럼 동작하는지 테스트하기 위한 페이지입니다.</p>
+  </div>
+  <div class="body">
+    <p>우측 하단의 버튼을 눌러 챗봇을 열어보세요. 이 페이지는 <code>http://localhost:5500</code>에서 서빙되고,
+    위젯은 <code>http://localhost:8080</code>의 FastAPI를 호출합니다 — 실제 운영 환경처럼 서로 다른 출처(origin)
+    간 통신(CORS)이 제대로 되는지도 같이 확인됩니다.</p>
+  </div>
+
+  <!-- 운영 환경에서는 이 값이 학과 서버의 실제 FastAPI 주소로 바뀜 -->
+  <script>window.GSC_CHAT_API_BASE = "http://localhost:8080";</script>
+  <script src="dist/widget.js"></script>
+</body>
+</html>
