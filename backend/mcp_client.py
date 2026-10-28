@@ -10,6 +10,10 @@ MCP 클라이언트 — 별도 파일이 아니라 "두 가지 역할을 가리�
          그 요청을 실제 네트워크 호출로 바꿔서 MCP 서버에 전달하고 결과를 받아옴.
          LLM은 네트워크 호출을 스스로 못 하기 때문에 이 중계가 반드시 필요함.
 
+역할 3 (embed_text, 2026-10-28 추가): MCP 서버의 "내부 전용" 임베딩 API(/internal/embed)를 호출.
+         이건 LLM이 쓰는 도구가 아니라 코드끼리 쓰는 기능이라 MCP 프로토콜이 아닌 일반 HTTP로 부름
+         (main.py가 정상 답변된 질문을 과거답변 검색 대상으로 저장할 때 사용).
+
 연결이 끊기거나 늦게 뜨는 경우 대비 (2026-10-28 리뷰 15번):
 - 앱 시작 시: MCP 서버가 아직 준비 안 됐으면 바로 죽지 않고 몇 번 재시도함
   (docker compose로 같이 띄우면 backend가 MCP보다 먼저 떠서 연결 실패로 종료되는 문제가 실제로 반복됐음)
@@ -20,7 +24,9 @@ MCP 클라이언트 — 별도 파일이 아니라 "두 가지 역할을 가리�
 import asyncio
 import logging
 import os
+from urllib.parse import urlsplit
 
+import httpx
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -31,6 +37,10 @@ MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:9000/mcp")
 # 그래도 안 되면 에러로 멈춤(주소 오타 같은 설정 오류를 무한정 기다리며 숨기지 않기 위함).
 MCP_CONNECT_RETRIES = 10
 MCP_CONNECT_RETRY_DELAY_SECONDS = 2.0
+
+# 내부 임베딩 API 대기 시간 — 로컬 CPU 임베딩은 MCP 서버가 뜬 뒤 "첫 호출" 때 BGE-M3 모델을 로딩해서
+# 수십 초가 걸릴 수 있음(이후 호출은 빠름). 백그라운드 작업이라 사용자 응답 속도와는 무관해서 넉넉하게 잡음.
+EMBED_TIMEOUT_SECONDS = 120.0
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -120,6 +130,23 @@ async def call_tool(name: str, arguments: dict) -> list[dict]:
         await _reconnect()
         result = await _client.call_tool(name, arguments)
     return result.data
+
+
+def _internal_api_url(path: str) -> str:
+    """MCP 서버 주소(예: http://mcp_server:9000/mcp)에서 같은 서버의 내부 API 주소를 만듦
+    (예: http://mcp_server:9000/internal/embed). 주소 설정을 MCP_SERVER_URL 하나로만 관리하기 위함."""
+    parts = urlsplit(MCP_SERVER_URL)
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
+async def embed_text(text: str) -> list[float]:
+    """MCP 서버의 내부 임베딩 API로 텍스트 임베딩(1024차원)을 받아옴.
+    실패하면(서버 다운, 타임아웃, 4xx/5xx) 예외를 그대로 올려보냄 — 호출하는 main.py가 백그라운드에서
+    잡아서 로그만 남김(임베딩 저장 실패는 "그 질문이 과거답변 검색에 안 걸린다"는 것뿐, 답변엔 영향 없음)."""
+    async with httpx.AsyncClient(timeout=EMBED_TIMEOUT_SECONDS) as client:
+        res = await client.post(_internal_api_url("/internal/embed"), json={"text": text})
+        res.raise_for_status()
+        return res.json()["embedding"]
 
 
 async def close_connection() -> None:

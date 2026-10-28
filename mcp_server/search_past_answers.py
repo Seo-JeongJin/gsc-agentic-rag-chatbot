@@ -13,20 +13,33 @@ from rrf import merge_rrf
 CANDIDATE_LIMIT = 20
 TOP_K = 5
 
+# "검색해도 되는 과거 답변"의 조건(2026-10-28 결정, 리뷰 1번) — 벡터/키워드 두 쿼리에 똑같이 적용.
+# - needs_review = FALSE: 에스컬레이션(답 못함)·가드레일 실패로 안전문구가 나간 질문 제외
+# - guardrail_passed = TRUE: 출력 가드레일 검사를 실제로 통과한 답변만
+# - user_rating이 없거나 1보다 큼: 사용자가 👎(1점)를 준 답변 제외
+# - embedding IS NOT NULL: 임베딩이 저장된 질문만(위 조건을 만족하는 질문만 backend가 임베딩을 저장함)
+# 전엔 "answer_text IS NOT NULL"(= 사실상 모든 질문)이라, 틀린 답이 "과거 답변" 근거로 재활용될 수 있었음.
+TRUSTED_ANSWER_CONDITION = """
+    needs_review = FALSE
+    AND guardrail_passed = TRUE
+    AND (user_rating IS NULL OR user_rating > 1)
+    AND embedding IS NOT NULL
+"""
+
 
 async def search_past_answers(query: str, top_k: int = TOP_K) -> list[dict]:
     pool = await get_pool()
     query_vector = embed(query)
 
     async with pool.acquire() as conn:
-        # answer_text가 NULL인 행(아직 답 못한 질문 등)은 검색 대상에서 제외.
+        # 믿을 만한 과거 답변(TRUSTED_ANSWER_CONDITION)만 검색 대상.
         # similarity(=1-벡터거리, 0~1)도 같이 반환 — search_documents.py와 같은 이유
         # (2026-10-27부터 LLM이 신뢰도 판단 재료로 씀).
         vector_rows = await conn.fetch(
-            """
+            f"""
             SELECT id, question_text, answer_text, 1 - (embedding <=> $1) AS similarity
             FROM questions
-            WHERE answer_text IS NOT NULL
+            WHERE {TRUSTED_ANSWER_CONDITION}
             ORDER BY embedding <=> $1
             LIMIT $2
             """,
@@ -34,10 +47,10 @@ async def search_past_answers(query: str, top_k: int = TOP_K) -> list[dict]:
             CANDIDATE_LIMIT,
         )
         keyword_rows = await conn.fetch(
-            """
+            f"""
             SELECT id, question_text, answer_text, 1 - (embedding <=> $1) AS similarity
             FROM questions
-            WHERE answer_text IS NOT NULL
+            WHERE {TRUSTED_ANSWER_CONDITION}
               AND content_tsv @@ plainto_tsquery('simple', $2)
             ORDER BY ts_rank(content_tsv, plainto_tsquery('simple', $2)) DESC
             LIMIT $3

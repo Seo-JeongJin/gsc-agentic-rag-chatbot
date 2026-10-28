@@ -42,6 +42,15 @@ async def save_log(
         return row["id"]
 
 
+async def save_question_embedding(question_id: int, embedding: list[float]) -> None:
+    """질문 임베딩(1024차원)을 questions.embedding에 저장 — 이게 있어야 search_past_answers의 벡터 검색
+    (롱텀 메모리)에 이 질문이 걸림. main.py가 정상 답변된 질문에 대해서만 백그라운드로 호출함(2026-10-28, 리뷰 1번).
+    (pgvector 타입 변환은 connection.py의 register_vector가 처리해서 파이썬 리스트를 그대로 넣을 수 있음)"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE questions SET embedding = $1 WHERE id = $2", embedding, question_id)
+
+
 async def set_rating(question_id: int, session_id: str, rating: int) -> bool:
     """사용자가 답변에 평가(👍/👎 등)를 남겼을 때 호출 — questions.user_rating을 갱신.
     위젯에서는 1(안좋음)~5(좋음) 중 썸업=5, 썸다운=1로 매핑해서 보냄.

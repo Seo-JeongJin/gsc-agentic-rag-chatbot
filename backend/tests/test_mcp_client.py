@@ -114,3 +114,16 @@ async def test_tool_error_is_not_retried():
     with pytest.raises(ToolError):
         await mcp_client.call_tool("search_documents", {"query": "q"})
     assert FakeClient.opened == 1
+
+
+# ----- 내부 임베딩 API 주소 (리뷰 1번, 3단계) -----
+
+
+def test_internal_api_url_is_derived_from_mcp_url(monkeypatch):
+    """MCP 서버 주소(…/mcp)에서 같은 서버의 내부 API 주소(…/internal/embed)를 만들어야 함 — 주소 설정을
+    하나(MCP_SERVER_URL)만 관리하기 위함. 로컬(127.0.0.1)과 Docker(서비스명 mcp_server) 둘 다 확인."""
+    monkeypatch.setattr(mcp_client, "MCP_SERVER_URL", "http://mcp_server:9000/mcp")
+    assert mcp_client._internal_api_url("/internal/embed") == "http://mcp_server:9000/internal/embed"
+
+    monkeypatch.setattr(mcp_client, "MCP_SERVER_URL", "http://127.0.0.1:9000/mcp")
+    assert mcp_client._internal_api_url("/internal/embed") == "http://127.0.0.1:9000/internal/embed"

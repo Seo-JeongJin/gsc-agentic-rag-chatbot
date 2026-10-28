@@ -84,3 +84,48 @@ async def test_reset_conversation_clears_short_term_memory(client, db):
 
     assert res.status_code == 200
     assert await fetch_recent_history("s1") == []
+
+
+# ----- 과거답변 검색용 질문 임베딩 저장 (리뷰 1번, 3단계) -----
+
+
+async def test_answered_question_gets_embedding_for_past_answer_search(client, db, monkeypatch):
+    """[1번 버그 재현] 정상 답변 + 출력 가드레일 통과한 질문은 응답 후 백그라운드로 임베딩이 저장돼야 함
+    — 그래야 다음 사람이 비슷한 질문을 할 때 search_past_answers의 벡터 검색에 걸림.
+    수정 전엔 임베딩을 저장하는 코드가 아예 없어서 질문 25건 중 0건이 임베딩을 갖고 있었음.
+    MCP 서버의 임베딩 API는 가짜로 바꿔 끼우고, 실제로 호출됐는지도 기록해서 확인."""
+    import mcp_client
+
+    calls = []
+
+    async def fake_embed_text(text):
+        calls.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(mcp_client, "embed_text", fake_embed_text)
+
+    qid = (await _ask(client, "기숙사 신청 방법 알려주세요"))["question_id"]
+
+    assert calls == ["기숙사 신청 방법 알려주세요"]
+    assert await db.fetchval("SELECT embedding IS NOT NULL FROM questions WHERE id=$1", qid) is True
+
+
+async def test_failed_answer_is_not_embedded(client, db, monkeypatch):
+    """출력 가드레일에 실패해서 에스컬레이션 문구로 바뀐 질문은 임베딩을 만들지 않음 — 어차피 과거답변
+    검색 조건(guardrail_passed=TRUE)에서 빠지므로 임베딩 비용만 낭비(2026-10-28 결정)."""
+    import main
+    import mcp_client
+
+    calls = []
+
+    async def fake_embed_text(text):
+        calls.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(mcp_client, "embed_text", fake_embed_text)
+    monkeypatch.setattr(main, "check_output", lambda answer, context: (False, "테스트용 강제 실패"))
+
+    qid = (await _ask(client, "기숙사 신청 방법 알려주세요"))["question_id"]
+
+    assert calls == []
+    assert await db.fetchval("SELECT embedding IS NULL FROM questions WHERE id=$1", qid) is True

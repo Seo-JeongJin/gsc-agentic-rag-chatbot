@@ -18,11 +18,14 @@ import guardrail
 import mcp_client
 from admin_api import router as admin_router
 from db.category_tagging import tag_question
-from db.log_service import save_log, set_rating
+from db.log_service import save_log, save_question_embedding, set_rating
 from db.memory_service import fetch_recent_history
 from db.session_service import process_session, reset_conversation
 from output_guardrail import check_output
 from system_prompt import ESCALATION_CONTACT_MESSAGE, SYSTEM_PROMPT
+
+# uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
+logger = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -95,6 +98,16 @@ async def rate_endpoint(payload: RateRequest) -> dict:
     return {"status": "ok"}
 
 
+async def store_question_embedding(question_id: int, question_text: str) -> None:
+    """백그라운드 작업: 질문 임베딩을 MCP 서버에서 받아 저장 → 이후 search_past_answers(롱텀 메모리)에 걸리게 됨.
+    실패해도 예외를 밖으로 던지지 않음 — 이미 답변은 나간 뒤라, 실패해도 "이 질문이 과거답변 검색에 안 걸림"뿐."""
+    try:
+        embedding = await mcp_client.embed_text(question_text)
+        await save_question_embedding(question_id, embedding)
+    except Exception as e:  # noqa: BLE001 — 백그라운드 실패가 서비스에 영향 주면 안 됨
+        logger.warning("질문 임베딩 저장 실패(question_id=%s): %s", question_id, e)
+
+
 @app.post("/api/ask", response_model=AskResponse)
 async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
     # 1번: 요청 수신 (FastAPI+Pydantic이 이미 question_text/session_id 형식 검증을 끝낸 상태)
@@ -144,6 +157,12 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # 15번: 카테고리 태깅 백그라운드 호출 — 분류 LLM 호출이 끝나길 기다리지 않고 바로 16번(응답)으로 넘어감.
     background_tasks.add_task(tag_question, question_id, payload.question_text, answer_text)
 
+    # 15-2번: 과거답변 검색용 질문 임베딩 저장 — 정상 답변(needs_review=False) + 출력 가드레일 통과(True)인
+    # 질문만(2026-10-28 결정). 에스컬레이션/가드레일 실패 답변은 어차피 search_past_answers의 검색 조건에서
+    # 빠지므로 임베딩을 만들 필요가 없음. 임베딩이 느릴 수 있어서 응답을 기다리게 하지 않고 백그라운드로.
+    if not needs_review and guardrail_passed:
+        background_tasks.add_task(store_question_embedding, question_id, payload.question_text)
+
     # 16번: 응답 반환 (지금은 비스트리밍 단순 응답 — SSE 스트리밍은 실제 vLLM 연결 시 추가)
     return AskResponse(answer_text=answer_text, question_id=question_id)
 
@@ -151,10 +170,6 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
 # 대시보드 빌드 결과물 위치 — 실행 위치(cwd)와 상관없이 항상 이 파일(main.py) 옆의 폴더를 가리키게
 # 절대경로로 계산(전엔 "static_dashboard" 상대경로라 backend/ 밖에서 실행하면 못 찾았음).
 DASHBOARD_DIR = Path(__file__).resolve().parent / "static_dashboard"
-
-# uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
-logger = logging.getLogger("uvicorn.error")
-
 
 def mount_dashboard(target_app: FastAPI, directory: Path = DASHBOARD_DIR) -> bool:
     """관리자 대시보드(React 빌드 결과물)를 "/"에 연결. 연결했으면 True, 폴더가 없어서 건너뛰었으면 False.

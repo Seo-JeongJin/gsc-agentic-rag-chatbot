@@ -48,7 +48,8 @@ FAKE_SEARCH_RESULT = [
 
 def _db_url(dbname: str) -> str:
     """POSTGRES_* 값(.env, db.connection import 시 로드됨)으로 localhost 접속 주소를 만듦.
-    호스트/포트는 기본 localhost:5432(docker-compose가 호스트에 열어둔 포트), 필요하면 환경변수로 변경."""
+    호스트/포트는 기본 localhost:5432(docker-compose가 호스트에 열어둔 포트), 필요하면 환경변수로 변경.
+    .env가 없으면 KeyError — 아래 test_database_url이 이걸 잡아서 통합 테스트를 skip 처리함."""
     host = os.environ.get("TEST_DB_HOST", "localhost")
     port = os.environ.get("TEST_DB_PORT", "5432")
     return (
@@ -67,7 +68,8 @@ def test_database_url() -> str:
 
     async def setup() -> tuple[str | None, Exception | None]:
         try:
-            # 관리용 기본 DB(postgres)에 접속해서 DB 자체를 만들고 지움
+            # 관리용 기본 DB(postgres)에 접속해서 DB 자체를 만들고 지움.
+            # .env가 없어서 _db_url()이 KeyError를 내는 경우도 여기서 같이 잡아서 skip(에러로 끝나지 않게).
             admin_conn = await asyncpg.connect(_db_url("postgres"), timeout=3)
         except Exception as e:  # noqa: BLE001 — 어떤 이유든 접속 불가면 skip 처리
             return None, e
@@ -96,14 +98,14 @@ def test_database_url() -> str:
 async def db(test_database_url, monkeypatch):
     """매 테스트마다: 앱의 DB 연결을 rag_test로 돌리고, 테이블을 비운 뒤 최소 카테고리만 넣음.
 
-    db.connection의 DATABASE_URL(모듈 전역 변수)을 바꿔치기하는 방식 — 앱 코드의 모든 DB 함수가
-    get_pool()을 통해 연결하므로 여기만 바꾸면 전부 테스트 DB를 보게 됨. 커넥션 풀(_pool)도 테스트마다
-    새로 만들고 끝나면 닫음(pytest-asyncio가 테스트마다 이벤트 루프를 새로 만들어서, 풀을 재사용하면
-    "다른 루프의 연결"이라 에러가 남)."""
+    db.connection의 접속 주소 결정 함수(_database_url)를 바꿔치기하는 방식 — 앱 코드의 모든 DB 함수가
+    get_pool()을 통해 연결하고, get_pool()은 처음 연결할 때 이 함수로 주소를 정하므로 여기만 바꾸면 전부
+    테스트 DB를 보게 됨. 커넥션 풀(_pool)도 테스트마다 새로 만들고 끝나면 닫음(pytest-asyncio가 테스트마다
+    이벤트 루프를 새로 만들어서, 풀을 재사용하면 "다른 루프의 연결"이라 에러가 남)."""
     # 안전장치: 혹시라도 개발 DB를 가리키고 있으면 TRUNCATE 전에 멈춤
     assert test_database_url.endswith(f"/{TEST_DB_NAME}"), test_database_url
 
-    monkeypatch.setattr(connection, "DATABASE_URL", test_database_url)
+    monkeypatch.setattr(connection, "_database_url", lambda: test_database_url)
     monkeypatch.setattr(connection, "_pool", None)
     pool = await connection.get_pool()
 
@@ -122,16 +124,23 @@ async def client(db, monkeypatch):
     """FastAPI 앱에 직접 HTTP 요청을 보내는 테스트용 클라이언트(서버를 띄우지 않음).
 
     httpx의 ASGITransport는 네트워크 없이 앱 함수를 직접 호출함. 이 방식은 앱의 lifespan(시작 시
-    MCP 서버 연결)을 실행하지 않으므로, 대신 MCP 클라이언트의 두 함수를 가짜로 바꿔 끼움.
+    MCP 서버 연결)을 실행하지 않으므로, 대신 MCP 클라이언트의 함수들을 가짜로 바꿔 끼움:
+    도구목록/도구호출(Agent 루프용) + 내부 임베딩 API(정상 답변 후 백그라운드로 호출됨). 임베딩까지 가짜로
+    하지 않으면, 이 노트북에 MCP 컨테이너가 떠 있는지에 따라 테스트가 실제 네트워크를 타거나 안 타서 결과가 달라짐.
     쿠키도 클라이언트가 자동으로 기억하므로 관리자 로그인 → 이후 요청 흐름도 그대로 테스트 가능."""
     import agent_loop
     import main
+    import mcp_client
 
     async def fake_call_tool(name, arguments):
         return FAKE_SEARCH_RESULT
 
+    async def fake_embed_text(text):
+        return [0.1] * 1024
+
     monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
     monkeypatch.setattr(agent_loop.mcp_client, "call_tool", fake_call_tool)
+    monkeypatch.setattr(mcp_client, "embed_text", fake_embed_text)
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
