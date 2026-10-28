@@ -6,10 +6,10 @@ FastAPI 진입점 — HTTP 요청을 받아 가드레일→세션처리→메모
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import agent_loop
 import guardrail
@@ -43,8 +43,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 관리자 라우터 등록 — /admin/login, /admin/logout, /admin/me (그리고 앞으로 추가될
-# 대시보드 조회 엔드포인트들)가 전부 이 한 줄로 main.py에 연결됨.
+# 관리자 라우터 등록 — admin_api.py에 있는 /admin/* 엔드포인트 전부(로그인/로그아웃,
+# 대시보드 조회, 로그 분석, 카테고리 제안)가 이 한 줄로 main.py에 연결됨.
 app.include_router(admin_router)
 
 
@@ -64,7 +64,13 @@ class ResetRequest(BaseModel):
 
 class RateRequest(BaseModel):
     question_id: int
-    rating: int  # 1~5. 위젯은 썸업=5, 썸다운=1로 매핑해서 보냄.
+    # 1~5만 허용 — 범위 밖이면 FastAPI가 엔드포인트 실행 전에 422로 거절함.
+    # (수정 전에는 아무 정수나 받아서 DB의 CHECK 제약에 걸려 500이 났음, 리뷰 9번)
+    # 위젯은 썸업=5, 썸다운=1로 매핑해서 보냄.
+    rating: int = Field(ge=1, le=5)
+    # 소유 확인용 — "이 질문을 한 세션"이 보낸 평가만 반영하기 위해 질문할 때와 같은 session_id를 받음.
+    # 이게 없으면 순차 증가하는 question_id만으로 남의 질문 평점을 조작할 수 있었음(리뷰 9번).
+    session_id: str
 
 
 @app.post("/api/reset_conversation")
@@ -77,8 +83,13 @@ async def reset_conversation_endpoint(payload: ResetRequest) -> dict:
 
 @app.post("/api/rate")
 async def rate_endpoint(payload: RateRequest) -> dict:
-    """프론트의 평가(👍/👎) 버튼이 호출. questions.user_rating을 갱신."""
-    await set_rating(payload.question_id, payload.rating)
+    """프론트의 평가(👍/👎) 버튼이 호출. questions.user_rating을 갱신.
+
+    질문 id와 session_id가 둘 다 맞는 행이 없으면 404 — "없는 질문"과 "남의 질문"을 구분하지
+    않고 같은 응답을 주는 이유: 구분해주면 "이 번호의 질문은 존재한다"는 정보가 새어나감."""
+    updated = await set_rating(payload.question_id, payload.session_id, payload.rating)
+    if not updated:
+        raise HTTPException(status_code=404, detail="평가할 질문을 찾을 수 없습니다.")
     return {"status": "ok"}
 
 

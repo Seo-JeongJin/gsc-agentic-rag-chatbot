@@ -72,9 +72,10 @@ function init() {
 
   // 평가(👍👎) 버튼: 서버에 전송만 하면 끝 — 화면은 ui.js가 버튼 클릭 시점에
   // 이미 active 스타일로 바꿔놨기 때문에 여기서 추가로 화면을 바꿀 필요 없음.
+  // 질문할 때 쓴 것과 같은 sessionId를 같이 보내야 백엔드의 소유 확인을 통과함.
   async function handleRate(questionId, rating) {
     try {
-      await rateAnswer(questionId, rating);
+      await rateAnswer(questionId, rating, sessionId);
     } catch (err) {
       console.error("[GSC 챗봇] 평가 전송 실패", err);
     }

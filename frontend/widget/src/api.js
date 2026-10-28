@@ -35,11 +35,13 @@ export async function resetConversation(sessionId) {
   }
 }
 
-export async function rateAnswer(questionId, rating) {
+// sessionId를 같이 보내는 이유: 백엔드가 "이 질문을 한 세션이 보낸 평가인지"(소유 확인)를
+// 대조해서, 질문 번호만 바꿔가며 남의 질문 평점을 조작하는 걸 막기 위함(2026-10-28 리뷰 9번).
+export async function rateAnswer(questionId, rating, sessionId) {
   const res = await fetch(`${API_BASE}/api/rate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question_id: questionId, rating }),
+    body: JSON.stringify({ question_id: questionId, rating, session_id: sessionId }),
   });
   if (!res.ok) {
     throw new Error(`평가 전송 실패 (${res.status})`);
