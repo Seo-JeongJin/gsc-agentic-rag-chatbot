@@ -141,25 +141,36 @@ def _check_rate_limit(session_id: str) -> tuple[bool, str | None]:
 
 def check_input(question_text: str, session_id: str) -> tuple[bool, str | None]:
     """
-    입력 가드레일의 진입점 — agent_loop 3번 단계에서 LLM 호출 전에 이 함수부터 실행.
+    입력 가드레일의 진입점 — main.py의 3번 단계에서 LLM 호출 전에 이 함수부터 실행.
 
     위의 규칙들을 순서대로 체크하고, 하나라도 걸리면 즉시 멈추고 (False, 사유)를 반환.
     전부 통과하면 (True, None) 반환 — 이 경우에만 다음 단계(LLM 호출)로 진행.
 
+    검사 순서에 의도가 있음 (2026-10-28 리뷰 7번 수정):
+    1. rate limit이 맨 앞 — 차단될 내용을 계속 보내는 요청도 서버 자원을 쓰므로, 내용과 상관없이
+       "모든 요청"을 횟수에 포함시켜야 함.
+    2. 내용 검사 5개(제어문자/길이/반복/XSS/PII) — 기록을 남기지 않는 순수 검사.
+    3. 중복 검사가 맨 뒤 — 이 함수는 검사와 동시에 "마지막 질문"을 기록하기 때문에, 다른 검사를
+       전부 통과한(= 실제로 처리될) 질문만 기록되게 하려면 마지막이어야 함.
+
     여기서 거르지 못하는 것(프롬프트 인젝션/욕설/시스템프롬프트 유출 시도)은
     의도적으로 이 함수의 책임이 아님 — system_prompt.py의 지침으로 LLM이 직접 처리.
     """
+    # 결과값이 아니라 "아직 실행하지 않은 함수"(lambda)를 모아둠 — 수정 전에는 튜플 안에서
+    # 함수를 바로 호출해서 7개가 전부 먼저 실행된 뒤에야 결과를 봤음(차단될 요청도 중복/횟수
+    # 기록이 남는 버그). 이제 아래 for문에서 하나씩 실행하다가 걸리면 그 뒤 검사는 실행 자체를 안 함.
     checks = (
-        _check_control_characters(question_text),
-        _check_length(question_text),
-        _check_repeated_spam(question_text),
-        _check_dangerous_patterns(question_text),
-        _check_pii(question_text),
-        _check_duplicate_request(question_text, session_id),
-        _check_rate_limit(session_id),
+        lambda: _check_rate_limit(session_id),
+        lambda: _check_control_characters(question_text),
+        lambda: _check_length(question_text),
+        lambda: _check_repeated_spam(question_text),
+        lambda: _check_dangerous_patterns(question_text),
+        lambda: _check_pii(question_text),
+        lambda: _check_duplicate_request(question_text, session_id),
     )
 
-    for passed, reason in checks:
+    for check in checks:
+        passed, reason = check()
         if not passed:
             return False, reason
 

@@ -126,6 +126,38 @@ def test_same_question_from_different_session_passes():
     assert check_input("전형료는 얼마인가요?", "s2")[0] is True
 
 
+# ----- 리뷰 7번: "하나라도 걸리면 즉시 멈춤" + 검사 순서 (2026-10-28 1단계에서 추가) -----
+
+
+def test_blocked_question_is_not_recorded_as_last_question():
+    """[7번 버그 재현] PII로 차단된 질문이 "마지막 질문"으로 기록되면 안 됨.
+    수정 전에는 7개 검사를 전부 먼저 실행한 뒤 결과를 봤기 때문에, 이미 차단될 질문인데도
+    중복검사 함수가 실행돼서 기록이 남았음. 중복검사는 다른 검사를 다 통과한 질문만 기록해야
+    "직전에 실제로 처리된 질문과 같은지"라는 원래 의미가 맞음."""
+    check_input("연락처는 010-1234-5678 입니다", "s1")
+    assert "s1" not in guardrail._last_question
+
+
+def test_rate_limited_question_is_not_recorded_as_last_question():
+    """[7번 버그 재현] rate limit으로 차단된 11번째 질문도 "마지막 질문"으로 기록되면 안 됨
+    — 기록은 10번째(실제로 통과한) 질문으로 남아 있어야 함."""
+    for i in range(10):
+        check_input(f"질문 {i}번", "s1")
+    check_input("차단될 질문", "s1")
+    assert guardrail._last_question["s1"][0] == "질문 9번"
+
+
+def test_blocked_requests_still_count_toward_rate_limit():
+    """[7번 수정 후 의도 고정] 내용 검사에서 차단될 요청이라도 요청 횟수에는 포함돼야 함 —
+    차단될 내용을 계속 보내는 것도 서버 자원을 쓰는 반복 요청이라, rate limit이 맨 먼저
+    모든 요청을 세도록 순서를 정함. PII 요청 10번 뒤의 정상 질문은 rate limit에 걸려야 함."""
+    for _ in range(10):
+        check_input("연락처는 010-1234-5678 입니다", "s1")
+    passed, reason = check_input("기숙사 있나요?", "s1")
+    assert passed is False
+    assert "요청이 너무 많습니다" in reason
+
+
 def test_rate_limit_allows_10_per_minute_and_blocks_11th():
     """1분에 10번까지는 허용, 11번째는 차단(경계값 테스트).
     질문 내용을 매번 다르게 해서 중복 차단 규칙과 섞이지 않게 함."""
