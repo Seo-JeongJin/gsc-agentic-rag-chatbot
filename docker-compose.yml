@@ -14,6 +14,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    # "DB가 접속을 받을 준비가 됐는지" 검사 — 다른 서비스가 depends_on에서 이 결과를 기다림.
+    # $$는 compose의 변수치환이 아니라 컨테이너 안의 환경변수를 쓰겠다는 뜻.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped   # 오류로 죽으면 Docker가 자동으로 다시 띄움(직접 stop한 경우는 제외)
 
   mcp_server:
     build: ./mcp_server
@@ -26,8 +34,18 @@ services:
     volumes:
       # BGE-M3 모델 캐시를 볼륨으로 빼둠 — 컨테이너를 다시 만들어도 모델을 매번 재다운로드 안 하게
       - hf_cache:/root/.cache/huggingface
+    # "MCP 서버가 9000번 포트로 접속을 받기 시작했는지" 검사 — 포트가 열렸다는 건 uvicorn이 기동을
+    # 끝냈다는 뜻(BGE-M3 모델은 첫 검색 때 로딩되므로 여기서 기다릴 필요 없음).
+    # slim 이미지엔 curl이 없어서 파이썬으로 소켓 연결만 시도함.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 9000), 2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
     depends_on:
-      - db
+      db:
+        condition: service_healthy   # DB가 준비된 다음에 시작
+    restart: unless-stopped
 
   backend:
     build: ./backend
@@ -37,9 +55,15 @@ services:
       MCP_SERVER_URL: http://mcp_server:9000/mcp
     ports:
       - "8080:8080"
+    # 전에는 "컨테이너가 시작됐는지"만 기다려서, MCP 서버가 아직 포트를 열기 전에 backend가 먼저 떠서
+    # 연결 실패로 종료되는 문제가 재빌드할 때마다 생겼음(리뷰 15번). 이제 healthcheck 통과(=실제로 준비됨)까지 기다림.
+    # 그래도 실패하면 mcp_client.py의 연결 재시도 → 그래도 안 되면 restart 정책이 컨테이너를 다시 띄움(3중 안전장치).
     depends_on:
-      - db
-      - mcp_server
+      db:
+        condition: service_healthy
+      mcp_server:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
