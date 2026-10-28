@@ -45,7 +45,11 @@ async def test_one_tool_call_then_final_answer(fake_mcp):
     assert result["needs_review"] is False
     assert result["review_reason"] is None
     assert isinstance(result["answer_text"], str) and result["answer_text"]
-    assert json.loads(result["retrieved_context"]) == FAKE_SEARCH_RESULT
+    # 출력 가드레일이 쓸 근거 — 검색 결과의 "본문"만 담겨야 함(2026-10-28 리뷰 4번으로 변경:
+    # 전엔 JSON 전체라 id·similarity 숫자까지 근거로 인정돼서 숫자 검사가 흐려졌음)
+    assert "기숙사 신청은 입학 후 학생생활관 홈페이지에서 합니다." in result["retrieved_context"]
+    assert "similarity" not in result["retrieved_context"]
+    assert "0.65" not in result["retrieved_context"]
 
 
 async def test_messages_ordered_system_history_question(fake_mcp, monkeypatch):
@@ -98,3 +102,95 @@ async def test_loop_limit_returns_escalation_and_needs_review(fake_mcp, monkeypa
     assert result["needs_review"] is True
     assert result["review_reason"] == "insufficient_info"
     assert thinking_flags == [False, False, True, True]
+    # [3번 버그 재현] 마지막(4번째) LLM 호출이 또 도구를 요청해도 실행하지 않아야 함 — 그 결과를 볼 LLM 호출이
+    # 더 없어서 검색 비용만 들고 tool_call_count만 부풀었음(2026-10-28 결정: 실행 안 하고 바로 에스컬레이션)
+    assert len(fake_mcp) == 3
+    assert result["tool_call_count"] == 3
+
+
+# ----- 리뷰 3번: 실제 LLM이 이상하게 응답해도 500으로 죽지 않기 (2026-10-28 4단계) -----
+
+
+def _tool_call_response(name: str, arguments: str) -> dict:
+    """도구 호출을 요청하는 LLM 응답 한 개."""
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": name, "arguments": arguments}}],
+    }
+
+
+def _scripted_llm(monkeypatch, responses: list[dict]) -> list[list[dict]]:
+    """LLM이 차례로 responses를 돌려주게 함. 매 호출 때 받은 messages를 기록해서 반환(무엇을 LLM에 보여줬는지 확인용)."""
+    seen = []
+    queue = list(responses)
+
+    async def scripted(messages, tools, thinking):
+        seen.append([dict(m) for m in messages])
+        return queue.pop(0)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", scripted)
+    return seen
+
+
+async def test_broken_tool_arguments_are_reported_back_to_llm(fake_mcp, monkeypatch):
+    """[3번 버그 재현] LLM이 도구 인자를 깨진 JSON으로 보내면, 수정 전엔 json.loads 예외로 /api/ask가 500이었음.
+    이제는 MCP를 부르지 않고 "인자를 해석할 수 없음"을 도구 결과로 LLM에게 돌려줘서, 다음 턴에 LLM이 스스로 고치게 함."""
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_documents", "{query: 깨진JSON"),
+        {"role": "assistant", "content": "다시 확인한 답변입니다", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("질문", history=[])
+
+    assert fake_mcp == []  # 깨진 인자로는 MCP를 부르지 않음
+    assert result["answer_text"] == "다시 확인한 답변입니다"
+    tool_message = seen[1][-1]
+    assert tool_message["role"] == "tool" and "인자" in tool_message["content"]
+
+
+async def test_unknown_tool_is_reported_back_to_llm(fake_mcp, monkeypatch):
+    """[3번 버그 재현] LLM이 없는 도구 이름을 지어내면(예: "search_web") MCP에 보내지 않고 에러를 도구 결과로 돌려줌."""
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [
+        {"type": "function", "function": {"name": "search_documents"}},
+    ])
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_web", json.dumps({"query": "q"})),
+        {"role": "assistant", "content": "답변", "tool_calls": None},
+    ])
+
+    await agent_loop.run_agent_loop("질문", history=[])
+
+    assert fake_mcp == []
+    assert "search_web" in seen[1][-1]["content"]
+
+
+async def test_mcp_tool_error_is_reported_back_to_llm(monkeypatch):
+    """[3번 버그 재현] MCP 도구 실행 자체가 실패(검색 서버 에러 등)해도 500이 아니라, 실패 사실을 LLM에게 알리고 루프를 계속함."""
+    async def failing_call_tool(name, arguments):
+        raise RuntimeError("검색 서버 오류")
+
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", failing_call_tool)
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_documents", json.dumps({"query": "q"})),
+        {"role": "assistant", "content": "답변", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("질문", history=[])
+
+    assert result["answer_text"] == "답변"
+    assert "실패" in seen[1][-1]["content"]
+    assert result["retrieved_context"] == ""  # 실패한 도구 결과는 근거로 쓰지 않음
+
+
+async def test_empty_answer_becomes_escalation(fake_mcp, monkeypatch):
+    """[3번 버그 재현] LLM이 도구도 안 부르고 빈 답(None/"")을 내면, 수정 전엔 None이면 출력 가드레일에서 500,
+    ""면 빈 말풍선이 나갔음. 이제는 연락처 안내(에스컬레이션) + 관리자 검토 필요로 처리."""
+    _scripted_llm(monkeypatch, [{"role": "assistant", "content": "", "tool_calls": None}])
+
+    result = await agent_loop.run_agent_loop("질문", history=[])
+
+    assert result["answer_text"] == ESCALATION_CONTACT_MESSAGE
+    assert result["needs_review"] is True
+    assert result["review_reason"] == "insufficient_info"

@@ -21,8 +21,9 @@ from db.category_tagging import tag_question
 from db.log_service import save_log, save_question_embedding, set_rating
 from db.memory_service import fetch_recent_history
 from db.session_service import process_session, reset_conversation
-from output_guardrail import check_output
-from system_prompt import ESCALATION_CONTACT_MESSAGE, SYSTEM_PROMPT
+from llm_client import LLMError
+from output_guardrail import build_grounded_context, check_output
+from system_prompt import ESCALATION_CONTACT_MESSAGE
 
 # uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
 logger = logging.getLogger("uvicorn.error")
@@ -123,8 +124,14 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # 4번: 숏텀 메모리 조회 (루프 시작 전 1회만)
     history = await fetch_recent_history(payload.session_id)
 
-    # 5~12번: Agent 루프 (지금은 가짜 LLM, 다음 주 실제 vLLM으로 교체 예정)
-    result = await agent_loop.run_agent_loop(payload.question_text, history)
+    # 5~12번: Agent 루프 (LLM_MODE=mock이면 가짜 LLM, vllm이면 실제 vLLM — llm_client.py)
+    # LLM 서버가 재시도까지 다 실패하면 503 — 답변 자체가 없으니 로그도 안 남김(위젯은 "잠시 후 다시 시도" 표시).
+    # 500이 아니라 503인 이유: 우리 코드 버그가 아니라 "GPU 서버가 일시적으로 응답 없음"이라는 뜻을 정확히 전달.
+    try:
+        result = await agent_loop.run_agent_loop(payload.question_text, history)
+    except LLMError as e:
+        logger.error("LLM 서버 호출 실패 — 503 응답: %s", e)
+        raise HTTPException(status_code=503, detail="답변 서버가 잠시 응답하지 않습니다. 잠시 후 다시 시도해 주세요.") from e
 
     answer_text = result["answer_text"]
     needs_review = result["needs_review"]
@@ -133,12 +140,14 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
 
     # 13번: 출력 가드레일 — 루프가 이미 상한도달로 폴백 문구를 낸 경우는 검사할 "진짜 답변"
     # 자체가 없어서 스킵(needs_review가 이미 True). 진짜 답변이 나온 경우만 근거비교.
-    # 근거 = system_prompt.py의 고정 지침(전화번호 등 검색 없이도 쓸 수 있는 사실) + 루프 중
-    # 실제로 검색된 문서/과거답변 텍스트 — 둘 중 하나라도 근거가 되면 통과시켜야 오탐이 줄어듦.
+    # 근거 = 고정 사실(연락처·취업실적) + 이번 대화의 이전 턴 + 이번 루프의 검색 결과 본문(build_grounded_context 참고).
+    # (2026-10-28 리뷰 4번: 전엔 SYSTEM_PROMPT 전체를 근거로 넣어서 판별력이 거의 없었음)
     if not needs_review:
-        grounded_context = SYSTEM_PROMPT + "\n" + result["retrieved_context"]
+        grounded_context = build_grounded_context(result["retrieved_context"], history)
         guardrail_passed, fail_reason = check_output(answer_text, grounded_context)
         if not guardrail_passed:
+            # 실패 사유를 로그로 남김 — 전엔 버려져서 나중에 가드레일을 튜닝(하네스)할 재료가 없었음
+            logger.warning("출력 가드레일 실패 — %s | 질문: %s | 원래 답변: %s", fail_reason, payload.question_text, answer_text)
             answer_text = ESCALATION_CONTACT_MESSAGE
             needs_review = True
             review_reason = "guardrail_failed"

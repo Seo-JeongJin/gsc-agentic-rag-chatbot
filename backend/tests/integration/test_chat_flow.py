@@ -129,3 +129,23 @@ async def test_failed_answer_is_not_embedded(client, db, monkeypatch):
 
     assert calls == []
     assert await db.fetchval("SELECT embedding IS NULL FROM questions WHERE id=$1", qid) is True
+
+
+# ----- LLM 서버 실패 처리 (리뷰 2번, 4단계) -----
+
+
+async def test_llm_server_failure_returns_503_without_logging(client, db, monkeypatch):
+    """LLM 서버가 재시도까지 다 실패하면 500(서버 버그처럼 보임)이 아니라 503(일시적으로 이용 불가)으로 응답하고,
+    답변이 없으니 로그도 남기지 않음 — 위젯은 503이면 "잠시 후 다시 시도" 안내를 띄움."""
+    import agent_loop
+    import llm_client
+
+    async def failing_llm(messages, tools, thinking):
+        raise llm_client.LLMError("GPU 서버 응답 없음")
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", failing_llm)
+
+    res = await client.post("/api/ask", json={"question_text": "기숙사 있나요?", "session_id": "s1"})
+
+    assert res.status_code == 503
+    assert await db.fetchval("SELECT COUNT(*) FROM questions") == 0
