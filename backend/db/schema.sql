@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- =========================================================
 CREATE TABLE sessions (
   session_id   TEXT PRIMARY KEY,                 -- 프론트가 crypto.randomUUID()로 생성해 쿠키에 담아 보내는 값. 이 세션의 유일한 식별자.
-  is_returning BOOLEAN NOT NULL DEFAULT FALSE,    -- 같은 session_id로 두 번째 이상 요청이 왔으면 TRUE로 바뀜. 재방문 여부를 바로 보여주는 플래그.
+  is_returning BOOLEAN NOT NULL DEFAULT FALSE,    -- 마지막 활동 후 30분 넘게 지나 같은 session_id로 다시 질문하면 TRUE(한 번 TRUE면 계속 유지). 재방문 여부 플래그 — 기준은 session_service.py의 RETURNING_VISIT_GAP_MINUTES.
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),-- 이 세션이 처음 등장한 시각. 날짜별 방문자 수 통계에 사용.
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),-- 가장 최근 활동 시각. "최근 활발한 세션인지" 판단에 사용.
   conversation_reset_at TIMESTAMPTZ               -- "새 대화 시작" 버튼을 누른 시각. NULL이면 리셋한 적 없음.
