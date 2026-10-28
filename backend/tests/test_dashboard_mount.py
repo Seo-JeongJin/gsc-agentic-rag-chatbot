@@ -28,3 +28,34 @@ def test_existing_dashboard_dir_is_served(tmp_path):
     res = TestClient(app).get("/")
     assert res.status_code == 200
     assert "dashboard" in res.text
+
+
+def test_widget_test_page_is_served_and_not_swallowed_by_dashboard(tmp_path):
+    """위젯 테스트 페이지(/widget-test/)와 위젯 번들이 내려와야 하고, 대시보드("/" 캐치올)가 이 경로를
+    가로채면 안 됨 — 학과 컴퓨터에서 Node.js 없이 위젯 화면을 확인하기 위한 페이지(2026-10-28)."""
+    from main import mount_widget_test
+
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    (dashboard / "index.html").write_text("<p>dashboard</p>", encoding="utf-8")
+    widget = tmp_path / "widget"
+    widget.mkdir()
+    (widget / "index.html").write_text('<script src="widget.js"></script>', encoding="utf-8")
+    (widget / "widget.js").write_text("console.log('widget')", encoding="utf-8")
+    app = FastAPI()
+
+    assert mount_widget_test(app, widget) is True
+    mount_dashboard(app, dashboard)
+    client = TestClient(app)
+
+    assert "widget.js" in client.get("/widget-test/").text
+    assert "widget.js" in client.get("/widget-test").text  # 끝에 / 없이 쳐도 리다이렉트로 열림
+    assert client.get("/widget-test/widget.js").status_code == 200
+    assert "dashboard" in client.get("/").text
+
+
+def test_missing_widget_dir_does_not_crash(tmp_path):
+    """위젯 테스트 폴더가 없어도(로컬에서 uvicorn 직접 실행 등) 서버는 켜져야 함 — 연결만 건너뜀."""
+    from main import mount_widget_test
+
+    assert mount_widget_test(FastAPI(), tmp_path / "없는폴더") is False

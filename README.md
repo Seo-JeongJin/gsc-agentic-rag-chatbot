@@ -59,6 +59,7 @@ docker compose up -d --build    # db → mcp_server → backend 순서로 준비
 
 - 챗봇 API: `http://localhost:8080/api/ask`
 - 관리자 대시보드: `http://localhost:8080/`
+- 위젯 테스트 페이지: `http://localhost:8080/widget-test/` (Docker 빌드 때 위젯도 자동으로 빌드됨)
 - DB를 처음 만들 때 카테고리 31개가 자동으로 들어갑니다(`backend/db/seed_categories.sql`).
 
 ### 문서 색인 (검색 대상 넣기)
@@ -115,7 +116,7 @@ GPU 서버는 학과망에서만 접속할 수 있으므로, **학과망에 연�
 4. **실행**: `docker compose up -d --build`
 5. **문서 색인**: 받은 FAQ 문서를 `data/`에 넣고 `docker compose exec mcp_server python3 index_cli.py /data/<문서파일>.md`
 6. **관리자 계정**: `docker compose exec backend python3 create_admin_cli.py <아이디> <비밀번호>`
-7. **확인**: 위의 curl로 질문을 보내고, `http://<이 컴퓨터>:8080/`에서 대시보드에 로그인해 질문 로그를 확인합니다.
+7. **확인**: `http://<이 컴퓨터>:8080/widget-test/`에서 위젯으로 질문해 보고, `http://<이 컴퓨터>:8080/`에서 대시보드에 로그인해 질문 로그를 확인합니다.
 
 ## 테스트
 

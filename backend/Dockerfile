@@ -19,6 +19,17 @@ COPY frontend/dashboard/ ./
 # vite.config.js의 outDir이 "../../backend/static_dashboard"라서 결과물은 /build/backend/static_dashboard에 생김
 RUN npm run build
 
+# ---------- ①-2 위젯 빌드 (2026-10-28) ----------
+# 위젯 번들(widget.js)도 git에 안 올리므로 여기서 만들어서, backend가 /widget-test/에서 테스트 페이지와 함께 내려줌
+# → 학과 컴퓨터에서 Node.js 없이 위젯 화면을 확인 가능.
+FROM node:20-alpine AS widget
+
+WORKDIR /build/frontend/widget
+COPY frontend/widget/package.json frontend/widget/package-lock.json ./
+RUN npm ci
+COPY frontend/widget/ ./
+RUN npm run build   # esbuild → dist/widget.js
+
 # ---------- ② 실행 이미지 ----------
 FROM python:3.12-slim
 
@@ -30,6 +41,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ .
 COPY --from=dashboard /build/backend/static_dashboard ./static_dashboard
+# 위젯 테스트 페이지: widget-test.html을 index.html로(→ /widget-test/ 주소로 바로 열림) + 번들
+COPY --from=widget /build/frontend/widget/dist/widget.js ./static_widget/widget.js
+COPY --from=widget /build/frontend/widget/widget-test.html ./static_widget/index.html
 
 EXPOSE 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

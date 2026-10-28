@@ -25,9 +25,10 @@ build/
 !README.md
 기획자료/
 
-# 빌드 결과물 — 소스(frontend/dashboard/)에서 다시 만들 수 있으므로 커밋 안 함.
-# 주의: 이걸 빼서 깨끗한 clone에서는 backend Docker 빌드에 대시보드가 없음 → 6단계에서 Dockerfile에 빌드 단계 추가 예정
+# 빌드 결과물 — 소스(frontend/)에서 다시 만들 수 있으므로 커밋 안 함.
+# backend Docker 빌드가 대시보드·위젯을 직접 빌드해서 넣으므로(backend/Dockerfile), 새로 clone해도 문제없음.
 backend/static_dashboard/
+backend/static_widget/
 
 # 테스트 실행 시 생기는 캐시
 .pytest_cache/

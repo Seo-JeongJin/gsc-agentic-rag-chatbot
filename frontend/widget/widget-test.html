@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>위젯 테스트 — 학과 홈페이지 흉내</title>
+<!--
+  backend가 /widget-test/ 주소로 직접 내려주는 테스트 페이지(Docker 빌드 때 위젯과 함께 들어감).
+  test.html(로컬 5500번 포트용)과 달리, 이 페이지는 backend와 "같은 주소"에서 열리므로 API 주소를
+  window.location.origin으로 잡음 — 학과 컴퓨터의 IP로 다른 PC에서 열어도 그 서버로 질문이 감.
+-->
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#fff;color:#0B1626;}
+  .hero{border-bottom:1px solid #E3E8F0;padding:48px 20px;text-align:center;}
+  .hero h1{margin:0 0 10px;}
+  .hero p{color:#5B6472;max-width:480px;margin:0 auto;line-height:1.6;}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <h1>영진전문대학교 글로벌시스템융합과</h1>
+    <p>위젯 테스트 페이지입니다. 오른쪽 아래 버튼을 눌러 챗봇에 질문해 보세요.</p>
+  </div>
+  <script>window.GSC_CHAT_API_BASE = window.location.origin;</script>
+  <script src="widget.js"></script>
+</body>
+</html>

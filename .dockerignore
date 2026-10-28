@@ -11,6 +11,7 @@
 **/*.pyc
 **/.pytest_cache
 backend/static_dashboard
+backend/static_widget
 frontend/widget/dist
 
 # 문서·원본 자료·git 이력 — 실행에 필요 없고 공개하면 안 되는 내용 포함

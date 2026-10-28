@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -179,6 +180,8 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
 # 대시보드 빌드 결과물 위치 — 실행 위치(cwd)와 상관없이 항상 이 파일(main.py) 옆의 폴더를 가리키게
 # 절대경로로 계산(전엔 "static_dashboard" 상대경로라 backend/ 밖에서 실행하면 못 찾았음).
 DASHBOARD_DIR = Path(__file__).resolve().parent / "static_dashboard"
+# 위젯 테스트 페이지(widget-test.html → index.html) + 위젯 번들(widget.js) — Docker 빌드 때 backend/Dockerfile이 채움
+WIDGET_TEST_DIR = Path(__file__).resolve().parent / "static_widget"
 
 def mount_dashboard(target_app: FastAPI, directory: Path = DASHBOARD_DIR) -> bool:
     """관리자 대시보드(React 빌드 결과물)를 "/"에 연결. 연결했으면 True, 폴더가 없어서 건너뛰었으면 False.
@@ -200,9 +203,32 @@ def mount_dashboard(target_app: FastAPI, directory: Path = DASHBOARD_DIR) -> boo
     return True
 
 
+def mount_widget_test(target_app: FastAPI, directory: Path = WIDGET_TEST_DIR) -> bool:
+    """위젯 테스트 페이지를 /widget-test/에 연결(2026-10-28 추가). 연결했으면 True, 폴더가 없으면 False.
+
+    학과 컴퓨터에서 Node.js 없이 위젯 화면을 확인하기 위함 — 위젯 번들(widget.js)은 git에 안 올리므로
+    Docker 빌드 때 만들어서 이 폴더에 넣고, backend가 같은 주소(8080)에서 내려줌. 페이지가 backend와 같은
+    출처에서 열리니 위젯의 API 주소도 자동으로 이 서버가 됨. 폴더가 없으면(로컬에서 uvicorn 직접 실행 등)
+    대시보드와 같은 이유로 경고만 남기고 건너뜀 — 테스트 페이지 하나 때문에 API가 안 켜지면 안 되니까."""
+    if not directory.is_dir():
+        logger.warning("위젯 테스트 폴더(%s)가 없어서 /widget-test는 연결하지 않음 — API는 정상 동작", directory)
+        return False
+
+    # 끝에 "/" 없이 /widget-test로 들어와도 열리게 — StaticFiles는 "/widget-test/"만 받아서 그냥 두면 404가 남.
+    # 페이지 안의 상대경로(widget.js)가 맞게 풀리려면 주소가 "/"로 끝나야 해서, 내용을 바로 주지 않고 리다이렉트.
+    @target_app.get("/widget-test", include_in_schema=False)
+    async def widget_test_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/widget-test/")
+
+    target_app.mount("/widget-test", StaticFiles(directory=directory, html=True), name="widget_test")
+    return True
+
+
 # 관리자 대시보드 서빙 — 반드시 다른 라우트들보다 "뒤에" 등록해야 함.
 # Starlette은 라우트를 등록된 순서대로 매칭하는데, 이 mount("/")는 "그 외 모든 경로"를
 # 받아버리는 캐치올이라 위에 있으면 /admin/*, /api/*가 전부 여기 걸려버림.
 # 같은 서버(8080)에서 화면과 API를 같이 내려주므로 CORS/쿠키 문제 자체가 생기지 않음
 # (프론트 React 코드가 fetch("/admin/...")로 호출해도 "같은 출처" 요청이 됨).
+# 위젯 테스트 페이지(/widget-test)도 "/" 캐치올보다 먼저 등록해야 대시보드에 가로채이지 않음.
+mount_widget_test(app)
 mount_dashboard(app)
