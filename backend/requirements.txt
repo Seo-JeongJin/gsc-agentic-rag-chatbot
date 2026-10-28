@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+asyncpg
+httpx
+pydantic
+fastmcp
+pgvector
+bcrypt
+python-dotenv
