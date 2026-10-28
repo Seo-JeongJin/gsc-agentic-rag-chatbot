@@ -1,0 +1,6 @@
+fastmcp
+asyncpg
+pgvector
+sentence-transformers
+numpy
+python-dotenv
