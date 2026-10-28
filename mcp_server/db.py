@@ -17,13 +17,26 @@ from pgvector.asyncpg import register_vector
 # (docker-compose.yml이 준 DATABASE_URL이 그대로 쓰임).
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-# DATABASE_URL이 있으면(Docker Compose) 그대로, 없으면(로컬) .env의 POSTGRES_* 값으로 localhost 주소 조립
-DATABASE_URL = os.environ.get("DATABASE_URL") or (
-    f"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
-    f"@localhost:5432/{os.environ['POSTGRES_DB']}"
-)
-
 _pool: asyncpg.Pool | None = None
+
+
+def _database_url() -> str:
+    """DB 접속 주소 결정 — backend/db/connection.py의 _database_url과 같은 규칙.
+    DATABASE_URL이 있으면(Docker Compose) 그대로, 없으면(로컬) .env의 POSTGRES_* 값으로 localhost 주소 조립.
+    import 시점이 아니라 처음 연결할 때 호출 — .env가 없는 환경에서 import만으로 KeyError가 나던 버그 수정(2026-10-28)."""
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    missing = [k for k in ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB") if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(
+            f"DB 접속 정보가 없음({', '.join(missing)}) — 프로젝트 루트에서 `cp .env.example .env` 후 값을 채우거나, "
+            "DATABASE_URL 환경변수를 지정할 것"
+        )
+    return (
+        f"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
+        f"@localhost:5432/{os.environ['POSTGRES_DB']}"
+    )
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -36,5 +49,5 @@ async def get_pool() -> asyncpg.Pool:
     """커넥션 풀을 한 번만 만들고 재사용 — 매 요청마다 새로 연결하면 느리고 자원 낭비."""
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, init=_init_connection)
+        _pool = await asyncpg.create_pool(_database_url(), init=_init_connection)
     return _pool
