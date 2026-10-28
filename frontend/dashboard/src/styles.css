@@ -1,0 +1,430 @@
+/* 디자인 토큰 — GSC 실제 브랜드 블루(#1D5FD6, 위젯에서도 쓴 색)에 근거.
+   운영 도구 성격이라 다크모드는 두지 않음(위젯과 같은 이유: 보는 사람 OS설정이 아니라
+   학과 브랜드 색을 그대로 유지하는 게 맞다고 판단, 261021_구현스펙.md 참고). */
+:root {
+  --color-bg: #f6f8fc;
+  --color-surface: #ffffff;
+  --color-border: #dce3ee;
+  --color-ink: #11203d;
+  --color-muted: #5b6b85;
+  --color-brand: #1d5fd6;
+  --color-brand-ink: #0f3d94;
+  --color-warn-bg: #fff2e0;
+  --color-warn-ink: #b35900;
+  --color-ok-bg: #e8f3ea;
+  --color-ok-ink: #2b7a3c;
+  --font-sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+button {
+  font-family: var(--font-sans);
+}
+
+/* ===== 레이아웃 ===== */
+
+.shell-center {
+  max-width: 320px;
+  margin: 96px auto;
+  padding: 0 24px;
+}
+
+/* 본문(.main)은 화면 전체 폭을 쓰고, 그 안에서 헤더만 가독성을 위해 넓게 잡음.
+   .shell이 880px로 좁게 가운데 정렬돼 있었던 게 사이드바+표가 동시에 좁아지는 원인이었음
+   — 사이드바를 화면 진짜 왼쪽 끝에 고정(position:fixed)하고 본문은 나머지 폭을 그대로 씀. */
+.main {
+  margin-left: 200px;
+  padding: 40px 40px 96px;
+  max-width: 1200px;
+}
+
+.shell-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 28px;
+}
+
+.shell-title {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.shell-title b {
+  color: var(--color-brand);
+}
+
+/* 창 전환 — 왼쪽 사이드바. 현재 선택된 창을 좌측 강조선+배경 틴트로 표시(장식이 아니라
+   "지금 뭘 보고 있는지"를 알려주는 기능적 표시). */
+/* 사이드바를 화면 진짜 왼쪽 끝(viewport 기준)에 고정 — .main의 margin-left(200px)가
+   이만큼의 공간을 본문 쪽에서 비워줌. flex 레이아웃으로 중앙정렬된 컨테이너 안에 두면
+   그 컨테이너의 좁은 폭에 같이 끼어버려서 진짜 왼쪽 끝이 아니게 됨. */
+.sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 200px;
+  padding: 28px 16px;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  font-size: 15px;
+  font-weight: 700;
+  padding: 0 14px;
+  margin-bottom: 22px;
+}
+
+.sidebar-brand b {
+  color: var(--color-brand);
+}
+
+.side-tab {
+  text-align: left;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--color-muted);
+  cursor: pointer;
+  border-radius: 0 6px 6px 0;
+}
+
+.side-tab.active {
+  color: var(--color-brand);
+  font-weight: 600;
+  background: rgba(29, 95, 214, 0.07);
+  border-left-color: var(--color-brand);
+}
+
+.side-tab:hover:not(.active) {
+  color: var(--color-ink);
+}
+
+@media (max-width: 640px) {
+  .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .main {
+    margin-left: 0;
+  }
+}
+
+/* ===== 버튼 ===== */
+
+.btn {
+  font-size: 13.5px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-brand-ink);
+  border-color: var(--color-brand-ink);
+  color: #fff;
+}
+
+/* ===== 세그먼트 버튼(필터) ===== */
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.segmented button {
+  border: none;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.segmented button:last-child {
+  border-right: none;
+}
+
+.segmented button.active {
+  background: var(--color-brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ===== 통계 스트립(Overview) ===== */
+
+.stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.stat {
+  flex: 1 1 33%;
+  min-width: 140px;
+  padding: 20px 20px;
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.stat:nth-child(3n) {
+  border-right: none;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 12.5px;
+  color: var(--color-muted);
+  margin-top: 4px;
+}
+
+/* ===== 표(질문 로그) ===== */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+/* 헤더 라벨("질문"/"평점" 등)은 짧은 한글 단어라, 칸이 좁아져도 절대 글자 단위로
+   줄바꿈되면 안 됨(그러면 세로로 쌓인 것처럼 보임) — 항상 한 줄 유지. */
+thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-muted);
+  font-size: 12.5px;
+  padding: 0 12px 10px 0;
+  border-bottom: 1.5px solid var(--color-ink);
+  white-space: nowrap;
+}
+
+tbody td {
+  padding: 12px 12px 12px 0;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+/* 질문/답변은 자유 텍스트라 길어서 줄바꿈이 필요하지만, 폭을 못 잡으면 나머지
+   칸(카테고리/상태/평점/시각)이 쥐어짜져서 글자가 세로로 쌓임 — 자유 텍스트 두 칸에만
+   비율을 주고, 나머지는 내용 길이에 맞춰 줄바꿈 없이(nowrap) 고정폭을 갖게 함. */
+table th:nth-child(1),
+table td:nth-child(1),
+table th:nth-child(2),
+table td:nth-child(2) {
+  width: 30%;
+}
+
+.cell-tight {
+  white-space: nowrap;
+}
+
+tbody tr:hover {
+  background: rgba(29, 95, 214, 0.04);
+}
+
+.cell-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pill-warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn-ink);
+}
+
+.pill-ok {
+  background: var(--color-ok-bg);
+  color: var(--color-ok-ink);
+}
+
+/* ===== 카테고리 — 대분류(진하게+합계) / 소분류(연하게+개별 막대) 중첩 ===== */
+
+.cat-group {
+  margin-bottom: 14px;
+}
+
+.cat-major-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1.5px solid var(--color-ink);
+}
+
+.cat-major-label {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.cat-major-count {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0 9px 18px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.cat-label {
+  flex: 0 0 220px;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+.cat-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.cat-bar-fill {
+  height: 100%;
+  background: var(--color-brand);
+  border-radius: 4px;
+  opacity: 0.75;
+}
+
+.cat-count {
+  flex: 0 0 40px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+/* ===== 로그 분석 ===== */
+
+.insight-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.insight-summary {
+  font-size: 15px;
+  line-height: 1.7;
+  max-width: 640px;
+}
+
+.insight-meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-muted);
+  margin-top: 10px;
+}
+
+.muted {
+  color: var(--color-muted);
+}
+
+/* ===== 로그인 ===== */
+
+.login-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 20px;
+}
+
+.login-field {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 14px;
+  background: var(--color-surface);
+  color: var(--color-ink);
+}
+
+.login-field:focus {
+  outline: none;
+  border-color: var(--color-brand);
+}
+
+.error-text {
+  color: var(--color-warn-ink);
+  font-size: 13px;
+  margin: 0 0 10px;
+}
