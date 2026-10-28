@@ -4,7 +4,9 @@ FastAPI 진입점 — HTTP 요청을 받아 가드레일→세션처리→메모
 여기는 그 앞뒤로 필요한 단계들을 순서대로 호출만 함.
 """
 
+import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -146,9 +148,37 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     return AskResponse(answer_text=answer_text, question_id=question_id)
 
 
-# 관리자 대시보드(React 빌드 결과물) 서빙 — 반드시 다른 라우트들보다 "뒤에" 등록해야 함.
+# 대시보드 빌드 결과물 위치 — 실행 위치(cwd)와 상관없이 항상 이 파일(main.py) 옆의 폴더를 가리키게
+# 절대경로로 계산(전엔 "static_dashboard" 상대경로라 backend/ 밖에서 실행하면 못 찾았음).
+DASHBOARD_DIR = Path(__file__).resolve().parent / "static_dashboard"
+
+# uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
+logger = logging.getLogger("uvicorn.error")
+
+
+def mount_dashboard(target_app: FastAPI, directory: Path = DASHBOARD_DIR) -> bool:
+    """관리자 대시보드(React 빌드 결과물)를 "/"에 연결. 연결했으면 True, 폴더가 없어서 건너뛰었으면 False.
+
+    폴더가 없을 때 에러 대신 경고만 남기는 이유(2026-10-28 리뷰 4번): 빌드 결과물은 git에 안 올리기
+    때문에 GitHub에서 새로 받은 컴퓨터(학과 컴퓨터 등)엔 이 폴더가 없음. 전엔 이 경우 StaticFiles가
+    서버 시작 단계에서 에러를 내서, 대시보드 "화면" 하나 때문에 챗봇 API(/api/*)와 관리자 API(/admin/*)까지
+    통째로 안 켜졌음. 화면이 없어도 API는 동작해야 하므로 연결만 건너뜀.
+    (근본 해결 — Docker 빌드 때 대시보드도 자동 빌드 — 은 4단계 L7)
+    """
+    if not directory.is_dir():
+        logger.warning(
+            "대시보드 빌드 폴더(%s)가 없어서 관리자 화면은 연결하지 않음 — API는 정상 동작. "
+            "화면이 필요하면 frontend/dashboard에서 npm install && npm run build",
+            directory,
+        )
+        return False
+    target_app.mount("/", StaticFiles(directory=directory, html=True), name="dashboard")
+    return True
+
+
+# 관리자 대시보드 서빙 — 반드시 다른 라우트들보다 "뒤에" 등록해야 함.
 # Starlette은 라우트를 등록된 순서대로 매칭하는데, 이 mount("/")는 "그 외 모든 경로"를
 # 받아버리는 캐치올이라 위에 있으면 /admin/*, /api/*가 전부 여기 걸려버림.
 # 같은 서버(8080)에서 화면과 API를 같이 내려주므로 CORS/쿠키 문제 자체가 생기지 않음
 # (프론트 React 코드가 fetch("/admin/...")로 호출해도 "같은 출처" 요청이 됨).
-app.mount("/", StaticFiles(directory="static_dashboard", html=True), name="dashboard")
+mount_dashboard(app)
