@@ -16,6 +16,10 @@ from db.connection import get_pool
 
 INSIGHT_TYPE = "failed_answers_summary"
 
+# 한 번의 분석(LLM 호출 1번)에 넣는 질문 수 상한 — 너무 많이 넣으면 프롬프트가 길어져서
+# LLM 컨텍스트(vLLM --max-model-len 8192)를 넘거나 요약 품질이 떨어짐. 넘는 만큼은 다음 클릭 때 이어서 분석.
+ANALYSIS_BATCH_SIZE = 50
+
 REVIEW_REASON_LABELS = {
     "insufficient_info": "정보 부족(검색해도 답을 못 찾음)",
     "guardrail_failed": "출력 가드레일 실패(근거 불충분)",
@@ -37,9 +41,13 @@ async def _get_current_review_state() -> tuple[int, int]:
         return row["total"], row["max_id"]
 
 
-async def fetch_review_questions(after_id: int = 0, limit: int = 50) -> list[dict]:
-    """답변못한 질문 조회. after_id를 주면 그 id보다 큰(= 그 이후에 생긴) 것만 가져옴
-    (트렌드 비교용 — "지난 분석 이후 새로 생긴 것만"). after_id=0이면 전체(최초 분석용)."""
+async def fetch_review_questions(after_id: int = 0, limit: int = ANALYSIS_BATCH_SIZE) -> list[dict]:
+    """답변못한 질문 조회. after_id보다 큰(= 그 이후에 생긴) 것만, **오래된 것부터** limit개.
+    after_id=0이면 처음부터(최초 분석용).
+
+    오래된 것부터인 이유(2026-10-28 리뷰 13번): 전엔 최신순으로 50개만 가져오면서 "어디까지 봤는지"는
+    전체 최대 id로 저장해서, 51개 이상 쌓이면 오래된 쪽이 영원히 분석되지 않았음. 오래된 것부터 가져오고
+    "실제로 가져온 것 중 마지막 id"까지만 기록하면, 다음 분석이 정확히 그 다음부터 이어서 봄."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -47,13 +55,22 @@ async def fetch_review_questions(after_id: int = 0, limit: int = 50) -> list[dic
             SELECT id, question_text, review_reason, created_at
             FROM questions
             WHERE needs_review = TRUE AND id > $1
-            ORDER BY created_at DESC
+            ORDER BY id ASC
             LIMIT $2
             """,
             after_id,
             limit,
         )
         return [dict(row) for row in rows]
+
+
+async def _count_review_questions_after(after_id: int) -> int:
+    """after_id 이후에 생긴 답변못한질문 개수 — 이번 분석 후 "아직 남은 개수"를 계산하는 데 씀."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT COUNT(*) FROM questions WHERE needs_review = TRUE AND id > $1", after_id
+        )
 
 
 def _format_question_list(questions: list[dict]) -> str:
@@ -103,7 +120,14 @@ async def generate_summary_llm_call(prompt: str) -> str:
     return "(가짜 분석 결과) 아직 실제 vLLM 연결 전이라 고정 텍스트입니다. 연결 후 이 함수 내부만 교체하면 됩니다."
 
 
-async def _save_insight(summary: str, based_on_count: int, new_since_last_count: int, last_question_id: int) -> dict:
+async def _save_insight(
+    summary: str, based_on_count: int, new_since_last_count: int, last_question_id: int, remaining_count: int
+) -> dict:
+    """분석 결과를 dashboard_insights에 새 행으로 저장. content 필드 의미:
+    - based_on_count: 지금까지 쌓인 답변못한질문 전체 개수
+    - new_since_last_count: 이번 분석에서 실제로 LLM에 넣은 질문 개수
+    - last_question_id: 이번 분석이 실제로 본 마지막 질문 id(다음 분석은 이 다음부터)
+    - remaining_count: 한 번에 다 못 봐서 아직 분석 안 된 개수(0이 아니면 대시보드가 "다시 눌러 이어서 분석" 안내)"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -118,6 +142,7 @@ async def _save_insight(summary: str, based_on_count: int, new_since_last_count:
                 "based_on_count": based_on_count,
                 "new_since_last_count": new_since_last_count,
                 "last_question_id": last_question_id,
+                "remaining_count": remaining_count,
             },
         )
         return {**dict(row), "cached": False}
@@ -127,35 +152,35 @@ async def run_analysis() -> dict:
     """
     버튼이 호출하는 메인 함수.
 
-    1) 이전 분석 결과가 없으면(최초 실행) → 지금 있는 전체 질문으로 요약
-    2) 이전 분석이 있으면 → 그때의 last_question_id보다 새 질문이 있는지 확인
-       - 없으면: 재분석 안 하고 기존 결과를 cached=True로 그대로 반환
-       - 있으면: 이전 요약 + 새 질문들만으로 "트렌드 비교" 요약
+    1) 이전 분석 결과가 있으면 그때의 last_question_id보다 새 질문이 있는지 확인
+       - 없으면: 재분석 안 하고 기존 결과를 cached=True로 그대로 반환(LLM 호출 없음)
+    2) 새 질문(최초 실행이면 처음부터)을 오래된 것부터 ANALYSIS_BATCH_SIZE개까지 가져와서
+       - 최초 실행: 전체요약 프롬프트 / 이후: "이전 요약 + 새 질문" 트렌드 비교 프롬프트
+    3) "실제로 본 마지막 id"와 "아직 남은 개수"를 같이 저장 — 남은 게 있으면 다음 클릭 때 이어서 분석
     """
     existing = await get_latest_insight()
     total_count, current_max_id = await _get_current_review_state()
+    last_question_id = existing["content"].get("last_question_id", 0) if existing else 0
 
-    if existing is None:
-        # 최초 실행 — 비교할 이전 결과가 없으니 전체 요약
-        questions = await fetch_review_questions(after_id=0)
-        prompt = _build_full_summary_prompt(questions)
-        summary = await generate_summary_llm_call(prompt)
-        return await _save_insight(summary, total_count, new_since_last_count=total_count, last_question_id=current_max_id)
-
-    last_question_id = existing["content"].get("last_question_id", 0)
-
-    if current_max_id <= last_question_id:
-        # 지난 분석 이후 새로 생긴 답변못한 질문이 없음 — 재분석 없이 기존 결과 재사용
+    if existing is not None and current_max_id <= last_question_id:
+        # 지난 분석 이후 새로 생긴(또는 아직 못 본) 답변못한 질문이 없음 — 재분석 없이 기존 결과 재사용
         return {**existing, "cached": True}
 
-    new_questions = await fetch_review_questions(after_id=last_question_id)
-    prompt = _build_trend_prompt(existing["content"]["summary"], new_questions)
+    questions = await fetch_review_questions(after_id=last_question_id)
+    if existing is None:
+        prompt = _build_full_summary_prompt(questions)
+    else:
+        prompt = _build_trend_prompt(existing["content"]["summary"], questions)
     summary = await generate_summary_llm_call(prompt)
+
+    # 질문이 0개(최초 실행인데 답변못한 질문이 아예 없음)면 기준점은 그대로 유지
+    analyzed_until_id = questions[-1]["id"] if questions else last_question_id
     return await _save_insight(
         summary,
         based_on_count=total_count,
-        new_since_last_count=len(new_questions),
-        last_question_id=current_max_id,
+        new_since_last_count=len(questions),
+        last_question_id=analyzed_until_id,
+        remaining_count=await _count_review_questions_after(analyzed_until_id),
     )
 
 
