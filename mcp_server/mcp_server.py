@@ -6,14 +6,13 @@ HTTP로 이 서버에 접속해 도구 목록을 받아오고(0번), 도구 호�
 지금은 로컬 개발 단계라 같은 노트북에서 포트만 분리해서 띄움.
 """
 
-import asyncio
 import os
 
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from embedding import embed
+from embedding import EmbeddingError, embed
 from search_documents import search_documents as _search_documents
 from search_past_answers import search_past_answers as _search_past_answers
 
@@ -51,9 +50,12 @@ async def internal_embed(request: Request) -> JSONResponse:
     if not isinstance(text, str) or not text.strip():
         return JSONResponse({"error": "text(비어있지 않은 문자열)가 필요함"}, status_code=400)
 
-    # embed()는 CPU를 오래 쓰는 동기 함수라, 그냥 부르면 계산하는 동안 이 서버의 다른 요청(검색 등)이 전부 멈춤.
-    # to_thread로 별도 스레드에서 돌려서 그동안에도 다른 요청을 처리할 수 있게 함.
-    vector = await asyncio.to_thread(embed, text)
+    # embed()는 async라 계산(local: 별도 스레드 / vllm: 비동기 HTTP)하는 동안에도 서버가 다른 요청을 처리함
+    try:
+        vector = await embed(text)
+    except EmbeddingError as e:
+        # 임베딩 서버(vLLM) 문제 — 호출한 backend가 로그만 남기고 넘어감(질문이 과거답변 검색에서 빠질 뿐)
+        return JSONResponse({"error": str(e)}, status_code=502)
     return JSONResponse({"embedding": vector})
 
 

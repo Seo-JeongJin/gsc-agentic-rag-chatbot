@@ -27,7 +27,7 @@ async def index_document(source: str, full_text: str) -> int:
     반환값: 몇 개의 청크가 저장됐는지.
     """
     chunks = split_markdown_into_chunks(full_text)
-    vectors = [embed(chunk_text) for chunk_text in chunks]
+    vectors = [await embed(chunk_text) for chunk_text in chunks]
 
     pool = await get_pool()
     async with pool.acquire() as conn:

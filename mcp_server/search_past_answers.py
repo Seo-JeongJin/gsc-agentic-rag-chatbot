@@ -29,7 +29,7 @@ TRUSTED_ANSWER_CONDITION = """
 
 async def search_past_answers(query: str, top_k: int = TOP_K) -> list[dict]:
     pool = await get_pool()
-    query_vector = embed(query)
+    query_vector = await embed(query)  # async — 임베딩 계산 동안 서버가 멈추지 않게(embedding.py 참고)
 
     async with pool.acquire() as conn:
         # 믿을 만한 과거 답변(TRUSTED_ANSWER_CONDITION)만 검색 대상.

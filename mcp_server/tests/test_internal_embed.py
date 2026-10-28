@@ -11,10 +11,15 @@ from starlette.testclient import TestClient
 import mcp_server as server
 
 
+async def _fake_embed(text):
+    """진짜 BGE-M3 대신 쓰는 가짜 임베딩(async — embedding.embed와 같은 형태)."""
+    return [0.5] * 1024
+
+
 def test_embed_returns_1024_dim_vector(monkeypatch):
     """텍스트를 보내면 1024차원 벡터를 JSON으로 돌려줘야 함(BGE-M3 차원 = questions.embedding 컬럼 차원).
     진짜 모델 대신 가짜 embed로 바꿔서 API 형식만 확인."""
-    monkeypatch.setattr(server, "embed", lambda text: [0.5] * 1024)
+    monkeypatch.setattr(server, "embed", _fake_embed)
     client = TestClient(server.mcp.http_app())
 
     res = client.post("/internal/embed", json={"text": "기숙사 신청 방법"})
@@ -25,7 +30,7 @@ def test_embed_returns_1024_dim_vector(monkeypatch):
 
 def test_embed_rejects_missing_or_blank_text(monkeypatch):
     """text가 없거나 공백뿐이면 400 — 빈 문자열 임베딩을 저장하면 모든 질문과 애매하게 비슷한 쓰레기 벡터가 됨."""
-    monkeypatch.setattr(server, "embed", lambda text: [0.5] * 1024)
+    monkeypatch.setattr(server, "embed", _fake_embed)
     client = TestClient(server.mcp.http_app())
 
     assert client.post("/internal/embed", json={}).status_code == 400
@@ -43,7 +48,7 @@ async def test_embed_api_is_not_exposed_as_mcp_tool():
 
 def test_embed_rejects_non_json_body(monkeypatch):
     """JSON이 아닌 요청이 오면 서버 오류(500)가 아니라 요청 오류(400)여야 함(커밋 전 자체 검토에서 발견)."""
-    monkeypatch.setattr(server, "embed", lambda text: [0.5] * 1024)
+    monkeypatch.setattr(server, "embed", _fake_embed)
     client = TestClient(server.mcp.http_app())
 
     res = client.post("/internal/embed", content=b"not json", headers={"Content-Type": "application/json"})

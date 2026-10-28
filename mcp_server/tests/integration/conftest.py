@@ -30,6 +30,11 @@ def fake_vector(seed: float = 0.1) -> list[float]:
     return [seed] * 1024
 
 
+async def async_fake_embed(text: str) -> list[float]:
+    """embedding.embed 대신 끼우는 가짜(async — 진짜 embed가 async라 같은 형태여야 await가 동작함)."""
+    return fake_vector()
+
+
 def _db_url(dbname: str) -> str:
     """.env(db.py import 시 로드됨)의 POSTGRES_* 값으로 localhost 주소 생성. 값이 없으면 KeyError → skip 처리됨."""
     host = os.environ.get("TEST_DB_HOST", "localhost")

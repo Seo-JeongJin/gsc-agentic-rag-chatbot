@@ -4,3 +4,4 @@ pgvector
 sentence-transformers
 numpy
 python-dotenv
+httpx

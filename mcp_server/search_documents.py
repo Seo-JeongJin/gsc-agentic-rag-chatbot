@@ -16,7 +16,7 @@ TOP_K = 5              # RRF 병합 후 최종적으로 몇 개를 돌려줄지
 
 async def search_documents(query: str, top_k: int = TOP_K) -> list[dict]:
     pool = await get_pool()
-    query_vector = embed(query)
+    query_vector = await embed(query)  # async — 임베딩 계산 동안 서버가 멈추지 않게(embedding.py 참고)
 
     async with pool.acquire() as conn:
         # (1) 벡터 유사도 검색 — <=> 는 pgvector의 코사인 거리 연산자, 작을수록 더 비슷함.
