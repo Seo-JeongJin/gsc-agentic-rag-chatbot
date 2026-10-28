@@ -31,6 +31,10 @@ services:
     environment:
       # db 서비스는 같은 Docker 네트워크 안이라 "db"라는 이름으로 서로 찾을 수 있음(localhost 아님)
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # 임베딩 계산 위치 — local(기본값, 집: 이 컨테이너 CPU) / vllm(학교: GPU 서버). 자세한 설명은 .env.example
+      EMBEDDING_MODE: ${EMBEDDING_MODE:-local}
+      EMBEDDING_URL: ${EMBEDDING_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
     ports:
       - "9000:9000"
     volumes:
@@ -54,11 +58,19 @@ services:
     restart: unless-stopped
 
   backend:
-    build: ./backend
+    # build context가 프로젝트 루트인 이유: Dockerfile ①단계에서 frontend/dashboard를 빌드해서 대시보드를
+    # 자동으로 넣기 때문(리뷰 L7). 루트의 .dockerignore가 .env·문서 등을 제외함.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: rag_backend
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       MCP_SERVER_URL: http://mcp_server:9000/mcp
+      # 생성 LLM — mock(기본값, 집: 가짜 응답) / vllm(학교: GPU 서버). 자세한 설명은 .env.example
+      LLM_MODE: ${LLM_MODE:-mock}
+      VLLM_URL: ${VLLM_URL:-}
+      VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3-14B-AWQ}
     ports:
       - "8080:8080"
     # 전에는 "컨테이너가 시작됐는지"만 기다려서, MCP 서버가 아직 포트를 열기 전에 backend가 먼저 떠서

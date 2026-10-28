@@ -1,0 +1,24 @@
+# backend 이미지 빌드 때(build context = 프로젝트 루트) Docker로 보내지 않을 것들.
+# 가장 중요: .env(실제 비밀번호/서버 주소)가 이미지 안에 들어가면 이미지를 가진 누구나 꺼내볼 수 있음 — 반드시 제외.
+.env
+.env.*
+!.env.example
+
+# 로컬 개발 환경/빌드 산출물 — 이미지 안에서 새로 설치·빌드함
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+backend/static_dashboard
+frontend/widget/dist
+
+# 문서·원본 자료·git 이력 — 실행에 필요 없고 공개하면 안 되는 내용 포함
+.git
+*.md
+기획자료
+학습노트
+data
+
+# 다른 서비스 — mcp_server는 자기 폴더를 build context로 따로 빌드함
+mcp_server
