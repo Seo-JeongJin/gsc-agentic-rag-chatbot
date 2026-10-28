@@ -143,11 +143,16 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # 자체가 없어서 스킵(needs_review가 이미 True). 진짜 답변이 나온 경우만 근거비교.
     # 근거 = 고정 사실(연락처·취업실적) + 이전 턴 + 이번 질문 + 이번 루프의 검색 결과 본문(build_grounded_context 참고).
     # (2026-10-28 리뷰 4번: 전엔 SYSTEM_PROMPT 전체를 근거로 넣어서 판별력이 거의 없었음)
-    # 검색 결과가 하나도 없는 답변(거절·안내 등)은 키워드 겹침 검사를 생략하고 숫자만 검사(2차 리뷰 1번 — check_output 참고).
+    # 도구를 한 번도 안 쓴 답변(거절·안내 등)만 키워드 겹침 검사를 생략하고 숫자만 검사(2차 리뷰 1번 — check_output 참고).
+    # 기준이 "검색 결과가 비었는지"가 아니라 "도구를 썼는지"인 이유(3차 리뷰 1번): 검색했는데 0건/실패한 뒤 LLM이 지어낸
+    # 답이 환각이 가장 잘 나는 경우라 이건 반드시 검사해야 함 — 전엔 결과가 비었다는 이유로 그대로 통과했음.
+    # 근거의 이전 대화는 LLM에 실제로 보낸(줄인) 것으로(3차 리뷰 5번).
     if not needs_review:
-        grounded_context = build_grounded_context(result["retrieved_context"], history, payload.question_text)
+        grounded_context = build_grounded_context(
+            result["retrieved_context"], result["history_used"], payload.question_text
+        )
         guardrail_passed, fail_reason = check_output(
-            answer_text, grounded_context, check_overlap=bool(result["retrieved_context"])
+            answer_text, grounded_context, check_overlap=result["tool_call_count"] > 0
         )
         if not guardrail_passed:
             # 실패 사유를 로그로 남김 — 전엔 버려져서 나중에 가드레일을 튜닝(하네스)할 재료가 없었음

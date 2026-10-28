@@ -30,9 +30,11 @@ _GROUNDING_FIELDS = ("chunk_text", "question_text", "answer_text")
 # + 검색 결과가 이걸 넘으면 vLLM이 400으로 거절함 → 503. 이전 대화가 24시간 남아 있어서 같은 세션은 계속 503이 됐음.
 # 토큰이 아니라 글자 수로 재는 이유: 정확한 토큰 수는 Qwen 토크나이저가 있어야 알 수 있어서, 한국어 1글자 ≈ 1토큰으로
 # 넉넉하게(보수적으로) 잡음. 실제 사용량은 llm_client가 vLLM 응답의 prompt_tokens를 로그로 남기니 학교에서 보고 조정할 것.
-MAX_HISTORY_CHARS = 1500            # 이전 대화 전체(최근 턴부터 채움)
-MAX_TOOL_RESULT_CHARS_TOTAL = 3000  # 한 질문의 루프 동안 LLM에 보내는 도구 결과 전체
-MAX_ITEM_TEXT_CHARS = 700           # 검색 결과 한 건의 본문(문서 청크 90%가 710자 이하 — 2026-10-28 실측)
+MAX_HISTORY_CHARS = 1500              # 이전 대화 전체(최근 턴부터 채움, 가장 최근 한 쌍은 길어도 잘라서 남김)
+MAX_TOOL_RESULT_CHARS_PER_CALL = 1500  # 검색 1번의 결과(JSON 포함) — 3차 리뷰 3번: 전엔 전체 예산을 첫 검색이 거의 다 써서
+                                       # 두 번째 검색이 문서 한 건도 못 받았음 → 검색마다 따로 배정
+MAX_TOOL_RESULT_CHARS_TOTAL = 4500     # 한 질문의 루프 동안 도구 결과 전체(검색 3번 × 1500)
+MAX_ITEM_TEXT_CHARS = 700              # 검색 결과 한 건의 본문(문서 청크 90%가 710자 이하 — 2026-10-28 실측)
 _TRUNCATION_MARK = "…(생략)"         # 잘렸다는 표시 — LLM이 "일부만 본 것"을 알 수 있게
 
 
@@ -97,15 +99,27 @@ def _grounding_text(result) -> str:
     return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
+def _truncate(text: str, max_chars: int) -> str:
+    """text가 max_chars보다 길면 앞부분만 남기고 잘렸다는 표시를 붙임."""
+    return text if len(text) <= max_chars else text[:max_chars] + _TRUNCATION_MARK
+
+
 def _trim_history(history: list[dict], max_chars: int = MAX_HISTORY_CHARS) -> list[dict]:
     """이전 대화를 길이 상한 안으로 줄임 — 가장 최근 질문/답변 쌍부터 거꾸로 채우고, 넘치면 그보다 오래된 건 뺌.
-    짝(user→assistant) 단위로 자르는 이유: 질문만 남고 답이 빠지거나 그 반대면 LLM이 대화를 잘못 이해함."""
+    짝(user→assistant) 단위로 자르는 이유: 질문만 남고 답이 빠지거나 그 반대면 LLM이 대화를 잘못 이해함.
+
+    가장 최근 한 쌍이 혼자 상한을 넘으면 통째로 버리지 않고 잘라서 남김(3차 리뷰 5번) — 전엔 긴 답변 바로 다음의
+    "그럼 그건요?" 같은 이어지는 질문이 이전 대화를 하나도 못 받아서 맥락을 잃었음. 질문 쪽은 짧게, 답변에 나머지를 줌."""
     pairs = [history[i:i + 2] for i in range(0, len(history), 2)]
     kept: list[list[dict]] = []
     used = 0
     for pair in reversed(pairs):
         size = sum(len(m.get("content") or "") for m in pair)
         if used + size > max_chars:
+            if not kept:  # 가장 최근 한 쌍조차 안 들어감 → 잘라서라도 남김
+                question_budget = min(len(pair[0].get("content") or ""), max_chars // 3)
+                budgets = [question_budget, max_chars - question_budget][: len(pair)]
+                kept.append([{**m, "content": _truncate(m.get("content") or "", b)} for m, b in zip(pair, budgets)])
             break
         kept.append(pair)
         used += size
@@ -161,6 +175,10 @@ async def _run_tool_call(call: dict, allowed_tools: set[str], remaining_chars: i
         logger.warning("도구 호출 실패(%s): %s", name, e)
         return json.dumps({"error": f"'{name}' 도구 실행 실패: {e}"}, ensure_ascii=False), ""
 
+    # "검색했는데 0건"과 "결과는 있는데 길이 예산 때문에 못 보냄"은 LLM에게 다르게 알려야 함(3차 리뷰 2번) — 전엔 0건도
+    # "길이 제한으로 생략됨"이라고 알려서 LLM이 "정보는 있는데 못 봤다"고 오해했음(과거답변 검색은 초기에 거의 항상 0건)
+    if result in ([], None, ""):
+        return json.dumps({"notice": "관련 검색 결과 없음 — 다른 검색어로 다시 찾거나, 정보가 없으면 문의처를 안내할 것"}, ensure_ascii=False), ""
     fitted = _fit_result_to_budget(result, remaining_chars)
     if not fitted:
         notice = "(검색 결과가 길이 제한을 넘어 생략됨 — 지금까지 받은 정보로 답하거나, 정보가 부족하면 문의처를 안내할 것)"
@@ -185,9 +203,11 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
     """
     Agent 루프의 본체. 5~12번 단계를 수행.
 
-    반환값: {"answer_text", "tool_call_count", "needs_review", "review_reason", "retrieved_context"}
+    반환값: {"answer_text", "tool_call_count", "needs_review", "review_reason", "retrieved_context", "history_used"}
     needs_review/review_reason은 questions 테이블 스키마와 그대로 맞춰둔 형태 — main.py가
-    이 값을 그대로 save_log()에 넘기면 됨. retrieved_context는 출력 가드레일용 근거(검색 결과 본문).
+    이 값을 그대로 save_log()에 넘기면 됨. retrieved_context는 출력 가드레일용 근거(검색 결과 본문),
+    history_used는 길이 상한으로 줄인 뒤 LLM에 "실제로 보낸" 이전 대화(가드레일 근거도 이걸로 — LLM이 못 본 내용으로
+    답을 통과시키지 않게, 3차 리뷰 5번).
     LLM 서버 자체가 실패하면(재시도까지 다 실패) llm_client.LLMError가 그대로 올라감 — main.py가 503으로 처리.
     """
     tools = mcp_client.get_cached_tools()  # 0번 단계에서 캐싱해둔 도구 목록
@@ -196,7 +216,7 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
     # 5번: 시스템 프롬프트 + 4번에서 가져온 과거 대화(길이 상한 안으로 줄여서) + 이번 질문을 합쳐 대화기록 구성
     messages: list[dict] = (
         [{"role": "system", "content": SYSTEM_PROMPT}]
-        + _trim_history(history)
+        + (history_used := _trim_history(history))
         + [{"role": "user", "content": question_text}]
     )
 
@@ -216,13 +236,14 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
             if not answer:
                 # 도구도 안 부르고 답도 비어 있음 — 빈 말풍선을 내보내지 않고 연락처 안내로(리뷰 3번)
                 logger.warning("LLM이 빈 답변을 반환함 — 에스컬레이션 처리")
-                return _escalation(tool_call_count, grounding_parts)
+                return {**_escalation(tool_call_count, grounding_parts), "history_used": history_used}
             return {
                 "answer_text": answer,
                 "tool_call_count": tool_call_count,
                 "needs_review": False,
                 "review_reason": None,
                 "retrieved_context": "\n".join(grounding_parts),
+                "history_used": history_used,
             }
 
         # 11번: 마지막 턴인데 또 도구를 요청 — 실행해도 그 결과를 볼 LLM 호출이 더 없으므로 실행하지 않고 종료
@@ -236,7 +257,9 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
         for call in response["tool_calls"]:
             tool_call_count += 1
             # 8번+9번: MCP로 실제 실행 → 결과(또는 실패 내용)를 LLM이 읽을 수 있는 텍스트로 대화기록에 추가
-            result_text, grounding = await _run_tool_call(call, allowed_tools, tool_chars_left)
+            # 검색 1번에 줄 수 있는 양 = 1회 상한과 남은 전체 예산 중 작은 쪽(앞 검색이 뒤 검색 몫까지 다 쓰지 않게)
+            call_budget = min(MAX_TOOL_RESULT_CHARS_PER_CALL, tool_chars_left)
+            result_text, grounding = await _run_tool_call(call, allowed_tools, call_budget)
             tool_chars_left -= len(result_text)
             if grounding:
                 grounding_parts.append(grounding)
@@ -244,4 +267,4 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
         # 이후 for 루프가 다시 돌면서 6번(재호출)으로 돌아감
 
     # 11번: 상한까지 다 썼는데도 최종 답변을 못 받은 경우
-    return _escalation(tool_call_count, grounding_parts)
+    return {**_escalation(tool_call_count, grounding_parts), "history_used": history_used}

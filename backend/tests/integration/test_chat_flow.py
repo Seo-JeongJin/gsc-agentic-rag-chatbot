@@ -169,3 +169,32 @@ async def test_refusal_without_tools_is_kept_and_not_flagged(client, db, monkeyp
     assert data["answer_text"] == refusal
     row = await db.fetchrow("SELECT guardrail_passed, needs_review FROM questions WHERE id=$1", data["question_id"])
     assert (row["guardrail_passed"], row["needs_review"]) == (True, False)
+
+
+async def test_made_up_answer_after_empty_search_is_still_checked(client, db, monkeypatch):
+    """[3차 1번 버그 재현] 검색은 했는데 결과가 0건이고 LLM이 그냥 지어낸 답(숫자 없음)을 내면 키워드 겹침 검사로 걸려야 함.
+    수정 전엔 "검색 결과가 비었으면 겹침 검사 생략"이라, 환각이 가장 잘 나는 이 경우가 그대로 통과했음.
+    이제 겹침 검사를 끄는 건 "도구를 한 번도 안 쓴 답변"(거절·안내)뿐."""
+    import agent_loop
+
+    async def empty_call_tool(name, arguments):
+        return []
+
+    made_up = "기숙사는 학교 안에 있고 신청은 선착순으로 받으며 입학식 다음 주에 배정 결과를 알려드려요."
+    responses = iter([
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "search_documents", "arguments": "{\"query\": \"기숙사\"}"}}]},
+        {"role": "assistant", "content": made_up, "tool_calls": None},
+    ])
+
+    async def scripted(messages, tools, thinking):
+        return next(responses)
+
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", empty_call_tool)
+    monkeypatch.setattr(agent_loop, "generate_llm_response", scripted)
+
+    data = await _ask(client, "기숙사 어디 있어요?")
+
+    assert data["answer_text"] != made_up
+    row = await db.fetchrow("SELECT guardrail_passed, review_reason FROM questions WHERE id=$1", data["question_id"])
+    assert (row["guardrail_passed"], row["review_reason"]) == (False, "guardrail_failed")

@@ -237,3 +237,68 @@ async def test_long_history_keeps_only_most_recent_turns(fake_mcp, monkeypatch):
     assert sum(len(m["content"]) for m in sent_history) <= agent_loop.MAX_HISTORY_CHARS
     assert sent_history[-1]["content"].startswith("답변9")  # 가장 최근 턴은 남아 있어야 함
     assert sent_history[0]["role"] == "user"               # 질문/답변 짝이 깨지지 않게 user부터 시작
+
+
+# ----- 3차 리뷰 2·3·5번 (2026-10-28) -----
+
+
+async def test_empty_search_result_is_reported_as_no_results(monkeypatch):
+    """[3차 2번 버그 재현] 검색 결과가 0건이면 "관련 결과 없음"으로 알려야 함 — 수정 전엔 "길이 제한으로 생략됨"이라고
+    잘못 알려서, LLM이 "정보는 있는데 못 봤다"고 오해했음(과거답변 검색은 초기에 거의 항상 0건)."""
+    async def empty_call_tool(name, arguments):
+        return []
+
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", empty_call_tool)
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_past_answers", json.dumps({"query": "q"})),
+        {"role": "assistant", "content": "답변", "tool_calls": None},
+    ])
+
+    await agent_loop.run_agent_loop("질문", history=[])
+
+    tool_content = seen[1][-1]["content"]
+    assert "결과 없음" in tool_content
+    assert "길이 제한" not in tool_content
+
+
+async def test_second_search_is_not_starved_by_the_first(monkeypatch):
+    """[3차 3번 버그 재현] 첫 검색이 길이 예산을 거의 다 써서 두 번째 검색(같은 턴의 과거답변 검색, 또는 다음 턴의
+    재검색)이 문서 한 건도 못 받았음 — 여러 번 검색하며 판단하는 루프가 사실상 1회 검색이 됐음.
+    이제 검색 1번마다 예산을 따로 줌: 두 번째 검색에도 실제 본문이 들어가야 함."""
+    results = [{"id": i, "chunk_text": "가" * 700, "source": "faq.md", "similarity": 0.6} for i in range(5)]
+
+    async def call_tool(name, arguments):
+        return results
+
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", call_tool)
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_documents", json.dumps({"query": "q1"})),
+        _tool_call_response("search_documents", json.dumps({"query": "q2"})),
+        {"role": "assistant", "content": "답변", "tool_calls": None},
+    ])
+
+    await agent_loop.run_agent_loop("질문", history=[])
+
+    tool_contents = [m["content"] for m in seen[-1] if m["role"] == "tool"]
+    assert len(tool_contents) == 2
+    assert all("가가가" in c for c in tool_contents)  # 두 번 다 실제 본문을 받음
+    assert all(len(c) <= agent_loop.MAX_TOOL_RESULT_CHARS_PER_CALL for c in tool_contents)
+
+
+async def test_long_latest_turn_is_truncated_not_dropped(fake_mcp, monkeypatch):
+    """[3차 5번 버그 재현] 가장 최근 질문/답변 한 쌍이 혼자 상한을 넘으면, 수정 전엔 이전 대화가 통째로 사라져서
+    긴 답변 바로 다음의 "그럼 그건요?" 같은 질문이 맥락을 잃었음. 최근 한 쌍은 잘라서라도 남겨야 함."""
+    history = [{"role": "user", "content": "전형 일정 자세히 알려주세요"},
+               {"role": "assistant", "content": "수시 1차는 " + "다" * 3000}]
+    seen = _scripted_llm(monkeypatch, [{"role": "assistant", "content": "답변", "tool_calls": None}])
+
+    result = await agent_loop.run_agent_loop("그럼 그건요?", history=history)
+
+    sent_history = seen[0][1:-1]
+    assert [m["role"] for m in sent_history] == ["user", "assistant"]
+    assert sent_history[1]["content"].startswith("수시 1차는")
+    assert sum(len(m["content"]) for m in sent_history) <= agent_loop.MAX_HISTORY_CHARS + 20  # 잘림 표시 몇 글자
+    # 출력 가드레일은 LLM이 실제로 본(잘린) 대화로 검사해야 함 — 못 본 내용으로 통과시키지 않게
+    assert result["history_used"] == sent_history
