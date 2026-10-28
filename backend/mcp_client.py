@@ -17,8 +17,9 @@ MCP 클라이언트 — 별도 파일이 아니라 "두 가지 역할을 가리�
 연결이 끊기거나 늦게 뜨는 경우 대비 (2026-10-28 리뷰 15번):
 - 앱 시작 시: MCP 서버가 아직 준비 안 됐으면 바로 죽지 않고 몇 번 재시도함
   (docker compose로 같이 띄우면 backend가 MCP보다 먼저 떠서 연결 실패로 종료되는 문제가 실제로 반복됐음)
-- 실행 중: MCP 서버가 재시작돼서 연결이 끊겼으면, 한 번 다시 연결해서 같은 호출을 재시도함
-  (전엔 backend를 재시작하기 전까지 모든 질문이 실패했음)
+- 실행 중: 호출이 연결 오류로 실패하면 한 번 다시 연결해서 같은 호출을 재시도하고, 재연결마저 실패했으면
+  다음 호출 때 다시 연결을 시도함. (참고: 2026-10-28 실측에서 MCP 서버만 재시작해 봤을 땐 fastmcp가 스스로
+  복구해서 이 경로까지 오지 않았음 — 리뷰 때 "재시작 전까지 전부 실패"라고 한 건 틀렸던 것. 안전장치로 유지.)
 """
 
 import asyncio
@@ -120,7 +121,10 @@ async def call_tool(name: str, arguments: dict) -> list[dict]:
     - 그 외 예외: 연결이 끊긴 것으로 보고 한 번만 재연결 후 재시도(두 번째도 실패하면 그 에러를 올려보냄)
     """
     if _client is None:
-        raise RuntimeError("MCP 클라이언트가 아직 연결되지 않음 — connect_and_cache_tools()가 먼저 호출돼야 함")
+        # 직전 재연결이 실패해서 연결이 비어 있는 상태 — 여기서 다시 연결을 시도함(2026-10-28 2차 리뷰 4번).
+        # 전엔 바로 에러만 내서, 재연결이 한 번 실패하면 backend를 재시작할 때까지 모든 검색이 실패했음.
+        # (앱 시작 전, 즉 connect_and_cache_tools가 아예 안 불린 경우엔 도구 목록도 없어서 애초에 여기 올 일이 없음)
+        await _reconnect()
     try:
         result = await _client.call_tool(name, arguments)
     except ToolError:

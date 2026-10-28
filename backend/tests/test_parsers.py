@@ -112,3 +112,22 @@ def test_cluster_with_markdown_and_spaced_colons():
         "reason": "반복됨",
         "question_numbers": [1, 2],
     }
+
+
+def test_analysis_prompt_truncates_long_questions():
+    """[2차 리뷰 5번] 로그 분석 프롬프트에 넣는 질문은 한 건당 길이 상한으로 잘라야 함 — 50건 × 최대 1000자를
+    그대로 넣으면 vLLM 길이 제한을 넘어 매번 502가 나고, 아무것도 저장되지 않아 분석이 영원히 막혔음."""
+    from db.analysis_service import MAX_QUESTION_CHARS_IN_PROMPT, _format_question_list
+
+    text = _format_question_list([{"question_text": "가" * 1000, "review_reason": "insufficient_info"}])
+
+    assert len(text) < MAX_QUESTION_CHARS_IN_PROMPT + 50  # 번호·이유 표시 몇 글자 + 잘린 질문
+
+
+def test_cluster_prompt_truncates_long_questions():
+    """[2차 리뷰 5번] 카테고리 제안 프롬프트도 같은 이유로 질문 한 건당 길이 상한."""
+    from db.batch_analysis import MAX_QUESTION_CHARS_IN_PROMPT, _build_cluster_prompt
+
+    prompt = _build_cluster_prompt([{"question_text": "가" * 1000}])
+
+    assert "가" * (MAX_QUESTION_CHARS_IN_PROMPT + 1) not in prompt

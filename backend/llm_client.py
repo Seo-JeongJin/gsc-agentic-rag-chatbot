@@ -102,7 +102,14 @@ async def _post_chat_completions(payload: dict) -> dict:
                 raise _RetryableError(f"vLLM 서버 오류 {res.status_code}: {res.text[:200]}")
             if res.status_code >= 400:
                 raise LLMError(f"vLLM 요청 거절 {res.status_code}: {res.text[:300]}")
-            return res.json()
+            data = res.json()
+            # 실제 토큰 사용량을 로그로 남김 — 길이 상한(agent_loop.MAX_*_CHARS 등)을 글자 수로 어림잡아 둬서,
+            # 학교에서 실제 prompt_tokens가 8192(--max-model-len)에 얼마나 가까운지 보고 조정하기 위함
+            usage = data.get("usage") or {}
+            if usage:
+                logger.info("LLM 사용량: prompt_tokens=%s, completion_tokens=%s",
+                            usage.get("prompt_tokens"), usage.get("completion_tokens"))
+            return data
         except (_RetryableError, httpx.TimeoutException, httpx.TransportError) as e:
             last_error = e
             logger.warning("LLM 호출 실패(%d/%d): %s", attempt + 1, MAX_RETRY + 1, e)

@@ -141,11 +141,14 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
 
     # 13번: 출력 가드레일 — 루프가 이미 상한도달로 폴백 문구를 낸 경우는 검사할 "진짜 답변"
     # 자체가 없어서 스킵(needs_review가 이미 True). 진짜 답변이 나온 경우만 근거비교.
-    # 근거 = 고정 사실(연락처·취업실적) + 이번 대화의 이전 턴 + 이번 루프의 검색 결과 본문(build_grounded_context 참고).
+    # 근거 = 고정 사실(연락처·취업실적) + 이전 턴 + 이번 질문 + 이번 루프의 검색 결과 본문(build_grounded_context 참고).
     # (2026-10-28 리뷰 4번: 전엔 SYSTEM_PROMPT 전체를 근거로 넣어서 판별력이 거의 없었음)
+    # 검색 결과가 하나도 없는 답변(거절·안내 등)은 키워드 겹침 검사를 생략하고 숫자만 검사(2차 리뷰 1번 — check_output 참고).
     if not needs_review:
-        grounded_context = build_grounded_context(result["retrieved_context"], history)
-        guardrail_passed, fail_reason = check_output(answer_text, grounded_context)
+        grounded_context = build_grounded_context(result["retrieved_context"], history, payload.question_text)
+        guardrail_passed, fail_reason = check_output(
+            answer_text, grounded_context, check_overlap=bool(result["retrieved_context"])
+        )
         if not guardrail_passed:
             # 실패 사유를 로그로 남김 — 전엔 버려져서 나중에 가드레일을 튜닝(하네스)할 재료가 없었음
             logger.warning("출력 가드레일 실패 — %s | 질문: %s | 원래 답변: %s", fail_reason, payload.question_text, answer_text)

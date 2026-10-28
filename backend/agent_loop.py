@@ -25,6 +25,16 @@ THINKING_OFF_UNTIL = 2         # 1~2번째 호출까지는 생각모드 끔, 3�
 # 검색 결과 중 출력 가드레일의 "근거"로 쓸 본문 필드 — 나머지(id, source, similarity)는 근거가 아니라 메타데이터
 _GROUNDING_FIELDS = ("chunk_text", "question_text", "answer_text")
 
+# LLM에 보내는 길이 상한(글자 수) — 2026-10-28 2차 리뷰 5번.
+# vLLM이 --max-model-len 8192(토큰)로 떠 있어서, 시스템 프롬프트(약 2,250자) + 이전 대화 + 이번 질문(최대 1,000자)
+# + 검색 결과가 이걸 넘으면 vLLM이 400으로 거절함 → 503. 이전 대화가 24시간 남아 있어서 같은 세션은 계속 503이 됐음.
+# 토큰이 아니라 글자 수로 재는 이유: 정확한 토큰 수는 Qwen 토크나이저가 있어야 알 수 있어서, 한국어 1글자 ≈ 1토큰으로
+# 넉넉하게(보수적으로) 잡음. 실제 사용량은 llm_client가 vLLM 응답의 prompt_tokens를 로그로 남기니 학교에서 보고 조정할 것.
+MAX_HISTORY_CHARS = 1500            # 이전 대화 전체(최근 턴부터 채움)
+MAX_TOOL_RESULT_CHARS_TOTAL = 3000  # 한 질문의 루프 동안 LLM에 보내는 도구 결과 전체
+MAX_ITEM_TEXT_CHARS = 700           # 검색 결과 한 건의 본문(문서 청크 90%가 710자 이하 — 2026-10-28 실측)
+_TRUNCATION_MARK = "…(생략)"         # 잘렸다는 표시 — LLM이 "일부만 본 것"을 알 수 있게
+
 
 async def _mock_llm_response(messages: list[dict], tools: list[dict] | None, thinking: bool) -> dict:
     """
@@ -87,8 +97,46 @@ def _grounding_text(result) -> str:
     return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
-async def _run_tool_call(call: dict, allowed_tools: set[str]) -> tuple[str, str]:
+def _trim_history(history: list[dict], max_chars: int = MAX_HISTORY_CHARS) -> list[dict]:
+    """이전 대화를 길이 상한 안으로 줄임 — 가장 최근 질문/답변 쌍부터 거꾸로 채우고, 넘치면 그보다 오래된 건 뺌.
+    짝(user→assistant) 단위로 자르는 이유: 질문만 남고 답이 빠지거나 그 반대면 LLM이 대화를 잘못 이해함."""
+    pairs = [history[i:i + 2] for i in range(0, len(history), 2)]
+    kept: list[list[dict]] = []
+    used = 0
+    for pair in reversed(pairs):
+        size = sum(len(m.get("content") or "") for m in pair)
+        if used + size > max_chars:
+            break
+        kept.append(pair)
+        used += size
+    return [m for pair in reversed(kept) for m in pair]
+
+
+def _fit_result_to_budget(result, remaining_chars: int):
+    """검색 결과를 LLM에 보낼 크기로 줄임: 결과 한 건의 본문은 MAX_ITEM_TEXT_CHARS로 자르고, 그래도 남은 예산을
+    넘으면 순위가 낮은(뒤쪽) 결과부터 뺌. 검색 결과 형식(dict 리스트)이 아니면 문자열로 바꿔서 앞부분만 남김."""
+    if not (isinstance(result, list) and all(isinstance(item, dict) for item in result)):
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        return text[:max(remaining_chars, 0)]
+
+    trimmed = []
+    for item in result:
+        item = dict(item)
+        for field in _GROUNDING_FIELDS:
+            value = item.get(field)
+            if isinstance(value, str) and len(value) > MAX_ITEM_TEXT_CHARS:
+                item[field] = value[:MAX_ITEM_TEXT_CHARS] + _TRUNCATION_MARK
+        trimmed.append(item)
+    # RRF 순위가 높은 앞쪽 결과를 남기기 위해, 예산 안에 들어올 때까지 뒤에서부터 뺌
+    while trimmed and len(json.dumps(trimmed, ensure_ascii=False)) > remaining_chars:
+        trimmed.pop()
+    return trimmed
+
+
+async def _run_tool_call(call: dict, allowed_tools: set[str], remaining_chars: int) -> tuple[str, str]:
     """도구 호출 하나를 실행(8~9번 단계). 반환: (LLM에게 보여줄 결과 텍스트, 출력 가드레일용 근거 텍스트).
+    remaining_chars: 이번 질문에서 도구 결과로 더 보낼 수 있는 글자 수(MAX_TOOL_RESULT_CHARS_TOTAL에서 남은 것).
+    근거 텍스트도 "LLM이 실제로 본(잘린) 내용"으로 만듦 — LLM이 못 본 내용으로 답을 검사하면 안 되니까.
 
     실패해도 예외를 던지지 않고 "실패했다"는 내용을 결과 텍스트로 돌려줌 — 이걸 LLM에게 보여주면 다음 턴에
     인자를 고치거나 다른 도구를 쓰는 등 스스로 판단할 수 있음(판단은 LLM, 실패 감지·전달은 코드).
@@ -113,7 +161,11 @@ async def _run_tool_call(call: dict, allowed_tools: set[str]) -> tuple[str, str]
         logger.warning("도구 호출 실패(%s): %s", name, e)
         return json.dumps({"error": f"'{name}' 도구 실행 실패: {e}"}, ensure_ascii=False), ""
 
-    return json.dumps(result, ensure_ascii=False), _grounding_text(result)
+    fitted = _fit_result_to_budget(result, remaining_chars)
+    if not fitted:
+        notice = "(검색 결과가 길이 제한을 넘어 생략됨 — 지금까지 받은 정보로 답하거나, 정보가 부족하면 문의처를 안내할 것)"
+        return json.dumps({"notice": notice}, ensure_ascii=False), ""
+    return json.dumps(fitted, ensure_ascii=False), _grounding_text(fitted)
 
 
 def _escalation(tool_call_count: int, grounding_parts: list[str]) -> dict:
@@ -141,15 +193,16 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
     tools = mcp_client.get_cached_tools()  # 0번 단계에서 캐싱해둔 도구 목록
     allowed_tools = {t["function"]["name"] for t in tools if "function" in t}
 
-    # 5번: 시스템 프롬프트 + 4번에서 가져온 과거 대화 + 이번 질문을 합쳐 대화기록 구성
+    # 5번: 시스템 프롬프트 + 4번에서 가져온 과거 대화(길이 상한 안으로 줄여서) + 이번 질문을 합쳐 대화기록 구성
     messages: list[dict] = (
         [{"role": "system", "content": SYSTEM_PROMPT}]
-        + history
+        + _trim_history(history)
         + [{"role": "user", "content": question_text}]
     )
 
     tool_call_count = 0
     grounding_parts: list[str] = []  # 성공한 도구 호출의 근거 텍스트만 모음
+    tool_chars_left = MAX_TOOL_RESULT_CHARS_TOTAL  # 이번 질문에서 도구 결과로 더 보낼 수 있는 글자 수
 
     for iteration in range(1, MAX_LOOP_ITERATIONS + 1):
         thinking = iteration > THINKING_OFF_UNTIL  # 3번째 호출부터 생각모드 켬
@@ -183,7 +236,8 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
         for call in response["tool_calls"]:
             tool_call_count += 1
             # 8번+9번: MCP로 실제 실행 → 결과(또는 실패 내용)를 LLM이 읽을 수 있는 텍스트로 대화기록에 추가
-            result_text, grounding = await _run_tool_call(call, allowed_tools)
+            result_text, grounding = await _run_tool_call(call, allowed_tools, tool_chars_left)
+            tool_chars_left -= len(result_text)
             if grounding:
                 grounding_parts.append(grounding)
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result_text})

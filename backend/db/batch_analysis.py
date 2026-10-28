@@ -21,6 +21,9 @@ from db.connection import get_pool
 
 MIN_FOR_SUGGESTION = 5
 SAMPLE_QUESTION_COUNT = 5  # 관리자 화면에 보여줄 샘플 질문 개수(관련 질문 중 앞에서부터)
+# 프롬프트에 넣는 질문 한 건의 최대 글자 수(2026-10-28 2차 리뷰 5번) — 50건 × 최대 1,000자를 그대로 넣으면
+# vLLM 길이 제한을 넘어 매번 502. 주제를 묶는 판단엔 질문 앞부분이면 충분함. (샘플 질문 저장은 원문 그대로)
+MAX_QUESTION_CHARS_IN_PROMPT = 150
 
 
 async def _get_unclassified_category_id() -> int:
@@ -41,7 +44,10 @@ async def fetch_unclassified_questions(category_id: int, limit: int = 50) -> lis
 
 
 def _build_cluster_prompt(questions: list[dict]) -> str:
-    lines = "\n".join(f"{i}. {q['question_text']}" for i, q in enumerate(questions, start=1))
+    def shorten(text: str) -> str:
+        return text if len(text) <= MAX_QUESTION_CHARS_IN_PROMPT else text[:MAX_QUESTION_CHARS_IN_PROMPT] + "…"
+
+    lines = "\n".join(f"{i}. {shorten(q['question_text'])}" for i, q in enumerate(questions, start=1))
     return f"""다음은 챗봇이 "기타"로 분류한(기존 카테고리 어디에도 맞지 않는) 질문들입니다.
 이 중에서 실제로 입학상담과 관련이 있고 반복되는 진짜 주제가 있는지 찾아주세요. 의미없는
 문자열, 테스트성 입력, 욕설, 완전히 무관한 질문(날씨 등)은 패턴을 찾는 근거로 쓰지 마세요.

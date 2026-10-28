@@ -127,3 +127,18 @@ def test_internal_api_url_is_derived_from_mcp_url(monkeypatch):
 
     monkeypatch.setattr(mcp_client, "MCP_SERVER_URL", "http://127.0.0.1:9000/mcp")
     assert mcp_client._internal_api_url("/internal/embed") == "http://127.0.0.1:9000/internal/embed"
+
+
+async def test_failed_reconnect_is_retried_on_next_call():
+    """[2차 리뷰 4번 버그 재현] 재연결이 한 번 실패하면(MCP 서버가 아직 안 떠 있음) 연결이 비어 있는 채로 남는데,
+    수정 전엔 그다음 호출부터 "아직 연결 안 됨" 에러만 내고 재연결을 다시 시도하지 않아서 backend를 재시작할
+    때까지 모든 검색이 실패했음. 다음 호출 때 다시 연결을 시도해서, 서버가 돌아왔으면 정상 동작해야 함."""
+    await mcp_client.connect_and_cache_tools()
+    FakeClient.call_errors = [RuntimeError("connection closed")]
+    FakeClient.connect_failures_left = 1          # 첫 재연결은 실패(서버가 아직 재시작 중)
+
+    with pytest.raises(RuntimeError):
+        await mcp_client.call_tool("search_documents", {"query": "q"})
+
+    result = await mcp_client.call_tool("search_documents", {"query": "q"})   # 서버가 돌아온 뒤의 다음 호출
+    assert result == [{"id": 1, "name": "search_documents"}]

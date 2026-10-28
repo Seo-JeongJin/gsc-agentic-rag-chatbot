@@ -8,8 +8,8 @@ LLM에게 설명하게 함 — 매번 전체를 처음부터 다시 요약하는
 새로 등장한 주제)를 알 수 있게. 자세한 배경은 261021_구현스펙.md 참고.
 
 여기서 쓰는 LLM 호출은 agent_loop.py의 도구호출 루프와 다름 — 도구를 쓸지 판단하는 게 아니라
-"프롬프트 하나 주고 요약 텍스트 하나 받는" 단발성 호출이라, agent_loop.py의 함수를
-재사용하지 않고 이 파일 안에 따로 가벼운 버전을 둠.
+"프롬프트 하나 주고 요약 텍스트 하나 받는" 단발성 호출이라 llm_client.complete()를 씀
+(네트워크·재시도·생각모드 끄기는 llm_client가 처리, 이 파일은 프롬프트 조립과 저장만).
 """
 
 import llm_client
@@ -20,6 +20,10 @@ INSIGHT_TYPE = "failed_answers_summary"
 # 한 번의 분석(LLM 호출 1번)에 넣는 질문 수 상한 — 너무 많이 넣으면 프롬프트가 길어져서
 # LLM 컨텍스트(vLLM --max-model-len 8192)를 넘거나 요약 품질이 떨어짐. 넘는 만큼은 다음 클릭 때 이어서 분석.
 ANALYSIS_BATCH_SIZE = 50
+# 프롬프트에 넣는 질문 한 건의 최대 글자 수(2026-10-28 2차 리뷰 5번) — 50건 × 최대 1,000자를 그대로 넣으면
+# vLLM 길이 제한(8192 토큰)을 넘어 매번 502가 나고, 아무것도 저장되지 않아 "어디까지 분석했는지"가 영원히 안 넘어갔음.
+# 패턴 요약에는 질문 앞부분이면 충분함(입학 질문은 대부분 이보다 짧음).
+MAX_QUESTION_CHARS_IN_PROMPT = 150
 
 REVIEW_REASON_LABELS = {
     "insufficient_info": "정보 부족(검색해도 답을 못 찾음)",
@@ -74,6 +78,11 @@ async def _count_review_questions_after(after_id: int) -> int:
         )
 
 
+def _shorten(text: str) -> str:
+    """질문이 MAX_QUESTION_CHARS_IN_PROMPT보다 길면 앞부분만 남기고 잘렸다는 표시를 붙임."""
+    return text if len(text) <= MAX_QUESTION_CHARS_IN_PROMPT else text[:MAX_QUESTION_CHARS_IN_PROMPT] + "…"
+
+
 def _format_question_list(questions: list[dict]) -> str:
     """질문 목록을 프롬프트에 넣을 "1. (이유: ...) 질문내용" 형태 텍스트로 변환."""
     if not questions:
@@ -81,7 +90,7 @@ def _format_question_list(questions: list[dict]) -> str:
     lines = []
     for i, q in enumerate(questions, start=1):
         reason_label = REVIEW_REASON_LABELS.get(q["review_reason"], q["review_reason"] or "알수없음")
-        lines.append(f"{i}. (이유: {reason_label}) {q['question_text']}")
+        lines.append(f"{i}. (이유: {reason_label}) {_shorten(q['question_text'])}")
     return "\n".join(lines)
 
 

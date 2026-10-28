@@ -194,3 +194,46 @@ async def test_empty_answer_becomes_escalation(fake_mcp, monkeypatch):
     assert result["answer_text"] == ESCALATION_CONTACT_MESSAGE
     assert result["needs_review"] is True
     assert result["review_reason"] == "insufficient_info"
+
+
+# ----- 2차 리뷰 5번: LLM에 보내는 길이 상한 (vLLM --max-model-len 8192 대비, 2026-10-28) -----
+
+
+async def test_long_search_results_are_truncated_before_sending(monkeypatch):
+    """[5번 버그 재현] 검색 결과가 길어도 LLM에 보내는 도구 결과는 길이 상한 안으로 잘려야 함.
+    수정 전엔 그대로 다 보내서, 검색 5건 × 최대 3번 + 이전 대화가 쌓이면 vLLM 길이 제한(8192)을 넘어
+    400 → 503이 났음(같은 세션은 이전 대화가 24시간 남아서 계속 503)."""
+    huge = [{"id": i, "chunk_text": "가" * 5000, "source": "faq.md", "similarity": 0.6} for i in range(5)]
+
+    async def huge_call_tool(name, arguments):
+        return huge
+
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", huge_call_tool)
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_documents", json.dumps({"query": "q"})),
+        _tool_call_response("search_documents", json.dumps({"query": "q2"})),
+        {"role": "assistant", "content": "답변", "tool_calls": None},
+    ])
+
+    await agent_loop.run_agent_loop("질문", history=[])
+
+    tool_contents = [m["content"] for m in seen[-1] if m["role"] == "tool"]
+    assert sum(len(c) for c in tool_contents) <= agent_loop.MAX_TOOL_RESULT_CHARS_TOTAL
+    assert "…" in tool_contents[0]  # 잘렸다는 표시가 남아야 LLM이 "일부만 본 것"을 알 수 있음
+
+
+async def test_long_history_keeps_only_most_recent_turns(fake_mcp, monkeypatch):
+    """[5번] 이전 대화(숏텀메모리)도 길이 상한 안에서 "최근 것부터" 남겨야 함 — 오래된 턴부터 뺌."""
+    history = []
+    for i in range(10):
+        history += [{"role": "user", "content": f"질문{i} " + "나" * 300},
+                    {"role": "assistant", "content": f"답변{i} " + "다" * 300}]
+    seen = _scripted_llm(monkeypatch, [{"role": "assistant", "content": "답변", "tool_calls": None}])
+
+    await agent_loop.run_agent_loop("이번 질문", history=history)
+
+    sent_history = seen[0][1:-1]  # [system, ...history..., 이번 질문]
+    assert sum(len(m["content"]) for m in sent_history) <= agent_loop.MAX_HISTORY_CHARS
+    assert sent_history[-1]["content"].startswith("답변9")  # 가장 최근 턴은 남아 있어야 함
+    assert sent_history[0]["role"] == "user"               # 질문/답변 짝이 깨지지 않게 user부터 시작

@@ -31,15 +31,18 @@ MIN_KEYWORDS_TO_CHECK = 3  # 답변의 키워드가 이보다 적으면(인사�
 _MIN_DIGITS_FOR_PARTIAL_MATCH = 3
 
 
-def build_grounded_context(retrieved_context: str, history: list[dict]) -> str:
-    """출력 가드레일의 "근거" 텍스트를 조립: 고정 사실 + 이번 대화의 이전 턴 + 이번 루프의 검색 결과 본문.
+def build_grounded_context(retrieved_context: str, history: list[dict], question_text: str = "") -> str:
+    """출력 가드레일의 "근거" 텍스트를 조립: 고정 사실 + 이번 대화의 이전 턴 + 이번 질문 + 이번 루프의 검색 결과 본문.
+
+    이번 질문을 넣는 이유(2026-10-28 2차 리뷰 6번): 답변이 사용자가 말한 숫자를 되받아 말하는 건 지어낸 게 아님 —
+    "내신 5등급인데 지원돼요?" → "5등급이셔도…"가 숫자 5 때문에 실패했음(이전 턴의 질문은 근거에 있는데 이번 질문만 빠져 있었음).
 
     2026-10-28 리뷰 4번으로 바뀜 — 전엔 main.py가 SYSTEM_PROMPT "전체"를 근거에 넣어서, 지침 번호("7. …")
     때문에 "7일" 같은 지어낸 숫자가 통과하고, 수백 개 지침 단어 때문에 무관한 답변도 키워드가 우연히 겹쳐
     통과했음(실측 중 발견된 "배경잡음" 문제). 이제 지침(행동 규칙)은 빼고 "답변에 나와도 되는 사실"만 근거로 씀.
     이전 턴을 넣는 이유: 앞에서 이미 안내한 내용을 다시 말하는 답변이 "근거 없음"으로 오탐되지 않게."""
     history_text = "\n".join(m["content"] for m in history if isinstance(m.get("content"), str))
-    return "\n".join(part for part in (GROUNDING_FACTS, history_text, retrieved_context) if part)
+    return "\n".join(part for part in (GROUNDING_FACTS, history_text, question_text, retrieved_context) if part)
 
 
 def _digits(token: str) -> str:
@@ -72,7 +75,7 @@ def _extract_keywords(text: str, min_length: int = 2) -> set[str]:
     return {t for t in tokens if len(t) >= min_length}
 
 
-def check_output(answer_text: str, grounded_context: str) -> tuple[bool, str]:
+def check_output(answer_text: str, grounded_context: str, check_overlap: bool = True) -> tuple[bool, str]:
     """
     (통과여부, 실패사유) 반환 — 통과 시 실패사유는 빈 문자열.
 
@@ -83,13 +86,18 @@ def check_output(answer_text: str, grounded_context: str) -> tuple[bool, str]:
        의미 없는 짧은 인사말/안내문까지 엄격하게 걸러내면 오탐(FPR)이 커짐.)
 
     grounded_context는 build_grounded_context()로 만든 것을 넘길 것(main.py 13번 단계).
+
+    check_overlap=False면 2번(키워드 겹침)을 생략하고 1번(숫자)만 검사 — 검색을 안 하고 나온 답변용
+    (2026-10-28 2차 리뷰 1번). 인젝션 거부·내부정보 거부·무관한 질문 안내처럼 시스템 프롬프트가 시킨 정당한 답변은
+    원래 검색 근거가 없어서 겹침이 0%가 되고 전부 실패 처리됐음. 이런 답변에서 위험한 건 지어낸 사실, 특히 숫자라서
+    숫자 검사는 그대로 둠. (한계: 검색 없이 숫자 없는 사실을 지어내면 못 잡음 — 실측 하네스로 확인할 것)
     """
     unsupported_numbers = _unsupported_numbers(answer_text, grounded_context)
     if unsupported_numbers:
         return False, f"답변에만 있고 근거에는 없는 숫자: {', '.join(sorted(unsupported_numbers))}"
 
     answer_keywords = _extract_keywords(answer_text)
-    if len(answer_keywords) < MIN_KEYWORDS_TO_CHECK:
+    if not check_overlap or len(answer_keywords) < MIN_KEYWORDS_TO_CHECK:
         return True, ""
 
     context_keywords = _extract_keywords(grounded_context)
