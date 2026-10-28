@@ -1,0 +1,5 @@
+# 개발/테스트 전용 의존성 — 운영 이미지(Dockerfile)에는 들어가지 않음.
+# 설치: .venv/bin/pip install -r requirements-dev.txt
+-r requirements.txt
+pytest
+pytest-asyncio
