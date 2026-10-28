@@ -13,7 +13,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # DB 볼륨이 비어 있을 때(최초 생성 시)만 파일 이름 순서대로 자동 실행됨: 테이블 생성 → 카테고리 31행
       - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./backend/db/seed_categories.sql:/docker-entrypoint-initdb.d/02_seed_categories.sql
     # "DB가 접속을 받을 준비가 됐는지" 검사 — 다른 서비스가 depends_on에서 이 결과를 기다림.
     # $$는 compose의 변수치환이 아니라 컨테이너 안의 환경변수를 쓰겠다는 뜻.
     healthcheck:
@@ -34,6 +36,10 @@ services:
     volumes:
       # BGE-M3 모델 캐시를 볼륨으로 빼둠 — 컨테이너를 다시 만들어도 모델을 매번 재다운로드 안 하게
       - hf_cache:/root/.cache/huggingface
+      # 색인할 학과 문서를 넣는 폴더(프로젝트 루트의 data/, git에서 제외). 컨테이너 안에서는 /data로 보임 →
+      #   docker compose exec mcp_server python3 index_cli.py /data/<파일이름>.md
+      # 읽기 전용(:ro) — 색인은 파일을 읽기만 하므로 컨테이너가 원본 문서를 실수로 바꾸지 못하게.
+      - ./data:/data:ro
     # "MCP 서버가 9000번 포트로 접속을 받기 시작했는지" 검사 — 포트가 열렸다는 건 uvicorn이 기동을
     # 끝냈다는 뜻(BGE-M3 모델은 첫 검색 때 로딩되므로 여기서 기다릴 필요 없음).
     # slim 이미지엔 curl이 없어서 파이썬으로 소켓 연결만 시도함.
