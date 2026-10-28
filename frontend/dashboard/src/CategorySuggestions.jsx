@@ -12,6 +12,8 @@ const STATUS_MESSAGES = {
   no_pattern: (r) => `"기타" 질문 ${r.checked_count}건을 확인했지만, 반복되는 진짜 주제는 찾지 못했습니다.`,
   already_proposed: (r) => `"${r.proposed_name}" 제안이 이미 대기 중입니다.`,
   already_category: (r) => `"${r.proposed_name}"는 이미 승인되어 사용 중인 카테고리입니다.`,
+  // 한 번 거절한 이름은 다시 제안하지 않음(백엔드 batch_analysis.py, 2026-10-28 결정)
+  already_rejected: (r) => `"${r.proposed_name}"는 이전에 거절한 제안이라 다시 제안하지 않습니다.`,
   proposed: () => "새 카테고리 제안이 생겼습니다 — 아래에서 확인해 주세요.",
 };
 

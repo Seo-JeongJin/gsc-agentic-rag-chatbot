@@ -6,7 +6,7 @@ main.py에 직접 다 적지 않고 별도 파일로 분리한 이유: main.py�
 역할 구분이 흐려짐. FastAPI의 APIRouter로 만들어서 main.py가 한 줄로 등록(include_router)만 하면 됨.
 """
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from db.admin_service import login as admin_login
@@ -19,6 +19,7 @@ from db.batch_analysis import (
     reject_proposal,
     run_category_suggestion,
 )
+from db.category_tagging import retag_etc_questions
 from db.dashboard_service import get_category_stats, get_overview_stats, get_questions
 
 router = APIRouter(prefix="/admin")
@@ -154,13 +155,17 @@ async def category_suggestions_endpoint(_admin_id: int = Depends(require_admin))
 
 @router.post("/category-suggestions/{proposal_id}/approve")
 async def approve_category_suggestion_endpoint(
-    proposal_id: int, _admin_id: int = Depends(require_admin)
+    proposal_id: int, background_tasks: BackgroundTasks, _admin_id: int = Depends(require_admin)
 ) -> dict:
-    """승인 — 이 순간에만 실제 categories 테이블에 새 행이 추가됨."""
+    """승인 — 이 순간에만 실제 categories 테이블에 새 행이 추가됨.
+    승인이 성공하면 기타>기타 질문들을 새 카테고리 목록으로 다시 분류하는 작업을 백그라운드로 등록
+    (질문마다 LLM을 부르므로 승인 응답을 기다리게 하지 않음 — category_tagging.retag_etc_questions 참고)."""
     try:
-        return await approve_proposal(proposal_id)
+        proposal = await approve_proposal(proposal_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    background_tasks.add_task(retag_etc_questions)
+    return proposal
 
 
 @router.post("/category-suggestions/{proposal_id}/reject")

@@ -8,12 +8,18 @@ category_proposals에 "제안"만 쌓아두는 기능. 실제 categories에 반�
 "의미없는 제안이 매번 쏟아지는" 상황을 막음:
 1. 임계치(코드): 기타로 분류된 질문이 MIN_FOR_SUGGESTION건 미달이면 LLM 호출 자체를 안 함.
 2. 노이즈 필터링(LLM): 쓰레기/무관 질문뿐이면 LLM이 "제안 없음"으로 응답하도록 프롬프트에 명시.
-추가로 같은 이름의 제안이 이미 대기 중이면 중복 저장하지 않음.
+추가로 같은 이름이 이미 카테고리로 있거나, 대기 중이거나, 관리자가 거절한 적 있으면 저장하지 않음.
+
+승인하면 기타>기타 질문들을 새 카테고리 목록으로 다시 분류함(category_tagging.retag_etc_questions,
+admin_api.py가 백그라운드로 호출) — 원래 질문들이 계속 기타에 남아서 같은 제안이 반복되는 원인을 없앰.
 """
+
+import re
 
 from db.connection import get_pool
 
 MIN_FOR_SUGGESTION = 5
+SAMPLE_QUESTION_COUNT = 5  # 관리자 화면에 보여줄 샘플 질문 개수(관련 질문 중 앞에서부터)
 
 
 async def _get_unclassified_category_id() -> int:
@@ -45,6 +51,7 @@ def _build_cluster_prompt(questions: list[dict]) -> str:
 진짜 반복되는 주제가 있으면 다음 형식으로만 답하세요:
 제안: 있음
 카테고리: <대분류> > <소분류>
+관련 질문: <위 목록에서 이 주제에 해당하는 질문 번호를 쉼표로 전부>
 이유: <한 줄 설명>
 
 반복되는 진짜 주제가 없으면 다음 한 줄만 답하세요:
@@ -57,46 +64,69 @@ async def generate_cluster_llm_call(prompt: str) -> str:
     ⚠️ 가짜 LLM 호출 — agent_loop.py와 같은 이유로 가짜(GPU서버가 교내망 전용이라
     집에서 연결 불가). 실제로는 위 프롬프트를 vLLM에 단발성으로 보내면 됨.
 
-    지금은 질문 목록에 "포트폴리오" 키워드가 과반 이상 나오면 패턴이 있는 척, 아니면
-    (쓰레기/제각각이면) "패턴 없음"으로 응답 — 실제 분류 판단이 아니라 "LLM 응답 파싱 →
-    중복확인 → category_proposals 저장"으로 이어지는 코드 쪽 로직을 테스트하기 위한 용도.
+    지금은 질문 목록에 "포트폴리오" 키워드가 과반 이상 나오면 패턴이 있는 척(그 질문들의 번호를
+    "관련 질문"으로 같이 돌려줌), 아니면(쓰레기/제각각이면) "패턴 없음"으로 응답 — 실제 분류 판단이
+    아니라 "LLM 응답 파싱 → 번호 검증 → 중복확인 → category_proposals 저장"으로 이어지는 코드 쪽
+    로직을 테스트하기 위한 용도.
     """
     _, _, after = prompt.partition("[질문 목록]\n")
     question_block, _, _ = after.partition("\n\n진짜 반복되는")
     lines = [line for line in question_block.splitlines() if line.strip()]
-    if lines and sum("포트폴리오" in line for line in lines) >= len(lines) / 2:
-        return "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n이유: 포트폴리오 제출 방법 관련 질문이 반복됨"
+    related = [i for i, line in enumerate(lines, start=1) if "포트폴리오" in line]
+    if lines and len(related) >= len(lines) / 2:
+        numbers = ", ".join(str(i) for i in related)
+        return (
+            "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n"
+            f"관련 질문: {numbers}\n이유: 포트폴리오 제출 방법 관련 질문이 반복됨"
+        )
     return "제안: 없음"
 
 
-def _parse_cluster_response(raw: str) -> dict | None:
+def _parse_cluster_response(raw: str, question_count: int) -> dict | None:
+    """LLM 응답에서 제안 내용을 뽑아냄. 제안할 게 없거나 형식이 불완전하면 None.
+
+    "관련 질문" 번호를 받는 이유(2026-10-28 리뷰 11번): 전엔 이름/이유만 받아서, 코드가 "어느 질문이
+    이 주제인지" 몰랐음 — 그래서 관련 질문 수 = 샘플 개수(항상 5 이하), 샘플 = 기타 질문 최근 5개
+    (주제와 무관한 "날씨" 질문이 섞임)로 저장됐음. 이제 LLM이 고른 번호로 실제 건수와 샘플을 만듦.
+
+    번호 검증(코드 담당): 목록 범위(1~question_count) 밖이거나 중복된 번호는 버림. 유효한 번호가
+    하나도 없으면 LLM의 판단 근거를 확인할 수 없으므로 제안하지 않음(None)."""
     lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
     if not lines or lines[0] != "제안: 있음":
         return None
 
     major, minor, reason = None, None, ""
+    question_numbers: list[int] = []
     for line in lines[1:]:
         if line.startswith("카테고리:") and ">" in line:
             value = line.split(":", 1)[1].strip()
             major, _, minor = value.partition(">")
             major, minor = major.strip(), minor.strip()
+        elif line.startswith("관련 질문:"):
+            for number in map(int, re.findall(r"\d+", line)):
+                if 1 <= number <= question_count and number not in question_numbers:
+                    question_numbers.append(number)
         elif line.startswith("이유:"):
             reason = line.split(":", 1)[1].strip()
 
-    if not major or not minor:
+    if not major or not minor or not question_numbers:
         return None
-    return {"major": major, "minor": minor, "reason": reason}
+    return {"major": major, "minor": minor, "reason": reason, "question_numbers": question_numbers}
 
 
-async def _save_proposal(major: str, minor: str, reason: str, sample_questions: list[str]) -> dict:
+async def _save_proposal(
+    major: str, minor: str, reason: str, related_question_count: int, sample_questions: list[str]
+) -> dict:
     """
     저장 전에 두 가지를 확인 — 둘 중 하나라도 걸리면 저장 안 함:
-    1. 이미 승인되어 categories에 실제로 존재하는 대/소분류인지. (2026-10-27 버그 수정:
-       승인해도 그 패턴을 만든 원래 질문들이 자동으로 재분류되진 않아서, 안 걸러주면
+    1. 이미 categories에 실제로 존재하는 대/소분류인지. (2026-10-27 버그 수정: 안 걸러주면
        버튼을 다시 누를 때마다 "이미 승인된 걸 또 제안"하는 무한반복이 생김 — 실측 중 발견.)
-    2. 같은 이름의 제안이 이미 pending 상태로 대기 중인지.
+    2. 같은 이름의 제안이 대기 중(pending)이거나, 관리자가 이미 거절(rejected)했는지.
+       (2026-10-28 리뷰 5번: 전엔 pending만 확인해서, 거절한 제안이 다음 클릭에 다시 생겼음.
+       결정: 한 번 거절한 이름은 영구히 다시 제안하지 않음 — 관리자의 거절 의사를 존중하고, 로직을 단순하게.)
 
-    반환: {"saved": True, "proposal": {...}} 또는 {"saved": False, "reason": "already_category"|"already_pending"}
+    반환: {"saved": True, "proposal": {...}} 또는
+         {"saved": False, "reason": "already_category" | "already_pending" | "already_rejected"}
     """
     proposed_name = f"{major} > {minor}"
     pool = await get_pool()
@@ -107,12 +137,18 @@ async def _save_proposal(major: str, minor: str, reason: str, sample_questions: 
         if already_category:
             return {"saved": False, "reason": "already_category"}
 
-        already_pending = await conn.fetchval(
-            "SELECT 1 FROM category_proposals WHERE proposed_name = $1 AND status = 'pending'",
+        # 같은 이름의 pending/rejected 제안이 있는지 — 있으면 그 상태를 그대로 사유로 씀
+        existing_status = await conn.fetchval(
+            """
+            SELECT status FROM category_proposals
+            WHERE proposed_name = $1 AND status IN ('pending', 'rejected')
+            ORDER BY (status = 'pending') DESC
+            LIMIT 1
+            """,
             proposed_name,
         )
-        if already_pending:
-            return {"saved": False, "reason": "already_pending"}
+        if existing_status is not None:
+            return {"saved": False, "reason": f"already_{existing_status}"}
 
         row = await conn.fetchrow(
             """
@@ -121,7 +157,7 @@ async def _save_proposal(major: str, minor: str, reason: str, sample_questions: 
             RETURNING id, proposed_name, related_question_count, sample_questions, status, created_at
             """,
             proposed_name,
-            len(sample_questions),
+            related_question_count,
             {"reason": reason, "questions": sample_questions},
         )
         return {"saved": True, "proposal": dict(row)}
@@ -141,15 +177,25 @@ async def run_category_suggestion() -> dict:
     questions = await fetch_unclassified_questions(category_id)
     prompt = _build_cluster_prompt(questions)
     raw_response = await generate_cluster_llm_call(prompt)
-    parsed = _parse_cluster_response(raw_response)
+    parsed = _parse_cluster_response(raw_response, question_count=len(questions))
 
     if parsed is None:
         return {"status": "no_pattern", "checked_count": total}
 
-    sample_texts = [q["question_text"] for q in questions[:5]]
-    result = await _save_proposal(parsed["major"], parsed["minor"], parsed["reason"], sample_texts)
+    # LLM이 고른 번호(1부터 시작, 프롬프트 목록 순서)로 실제 관련 질문만 골라냄 — 건수와 샘플을 여기서 만듦
+    related = [questions[n - 1]["question_text"] for n in parsed["question_numbers"]]
+    result = await _save_proposal(
+        parsed["major"], parsed["minor"], parsed["reason"],
+        related_question_count=len(related),
+        sample_questions=related[:SAMPLE_QUESTION_COUNT],
+    )
     if not result["saved"]:
-        status = "already_category" if result["reason"] == "already_category" else "already_proposed"
+        # 프론트(CategorySuggestions.jsx)의 상태별 안내 문구 키와 맞춤
+        status = {
+            "already_category": "already_category",
+            "already_pending": "already_proposed",
+            "already_rejected": "already_rejected",
+        }[result["reason"]]
         return {"status": status, "proposed_name": f"{parsed['major']} > {parsed['minor']}"}
     return {"status": "proposed", "proposal": result["proposal"]}
 
@@ -169,29 +215,35 @@ async def get_pending_proposals() -> list[dict]:
 
 
 async def approve_proposal(proposal_id: int) -> dict:
-    """제안을 승인 — 이 순간에만 실제 categories 테이블에 반영됨(LLM은 제안만, 실행은 여기서)."""
+    """제안을 승인 — 이 순간에만 실제 categories 테이블에 반영됨(LLM은 제안만, 실행은 여기서).
+
+    동시 승인 방지(2026-10-28 리뷰 12번): 전엔 "pending인지 SELECT로 확인 → 카테고리 INSERT →
+    approved로 UPDATE"를 트랜잭션 없이 따로 실행해서, 승인 요청 2개가 동시에 오면 둘 다 "아직 pending"으로
+    보고 둘 다 성공할 수 있었음. 이제는:
+    1. 트랜잭션으로 묶음 — 중간에 실패하면 둘 다 취소(카테고리만 생기고 제안은 pending으로 남는 어긋남 방지)
+    2. 확인과 변경을 "WHERE status='pending'인 행만 UPDATE" 한 문장으로 — 동시에 온 두 번째 요청은 첫 번째가
+       끝날 때까지 DB가 기다리게 했다가, 이미 approved라 조건에 안 맞아서 아무것도 못 바꿈 → 400
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        proposal = await conn.fetchrow(
-            "SELECT id, proposed_name, status FROM category_proposals WHERE id = $1", proposal_id
-        )
-        if proposal is None:
-            raise ValueError("존재하지 않는 제안입니다.")
-        if proposal["status"] != "pending":
-            raise ValueError("이미 처리된 제안입니다.")
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE category_proposals SET status = 'approved' WHERE id = $1 AND status = 'pending' "
+                "RETURNING id, proposed_name, related_question_count, sample_questions, status, created_at",
+                proposal_id,
+            )
+            if row is None:
+                # 바뀐 행이 없음 = 없는 제안이거나 이미 처리된 제안 — 어느 쪽인지 구분해서 안내
+                exists = await conn.fetchval("SELECT 1 FROM category_proposals WHERE id = $1", proposal_id)
+                raise ValueError("이미 처리된 제안입니다." if exists else "존재하지 않는 제안입니다.")
 
-        major, _, minor = proposal["proposed_name"].partition(">")
-        await conn.execute(
-            "INSERT INTO categories (major, minor) VALUES ($1, $2) ON CONFLICT (major, minor) DO NOTHING",
-            major.strip(),
-            minor.strip(),
-        )
-        row = await conn.fetchrow(
-            "UPDATE category_proposals SET status = 'approved' WHERE id = $1 "
-            "RETURNING id, proposed_name, related_question_count, sample_questions, status, created_at",
-            proposal_id,
-        )
-        return dict(row)
+            major, _, minor = row["proposed_name"].partition(">")
+            await conn.execute(
+                "INSERT INTO categories (major, minor) VALUES ($1, $2) ON CONFLICT (major, minor) DO NOTHING",
+                major.strip(),
+                minor.strip(),
+            )
+            return dict(row)
 
 
 async def reject_proposal(proposal_id: int) -> dict:

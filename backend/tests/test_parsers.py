@@ -44,22 +44,37 @@ def test_category_without_separator_falls_back_to_etc():
 # ----- 카테고리 제안(T6) 파서 (batch_analysis._parse_cluster_response) -----
 
 def test_cluster_proposal_is_parsed():
-    """"제안: 있음" 형식이면 대분류/소분류/이유 3가지를 각각 뽑아내야 함
-    — 이 값들이 그대로 category_proposals에 저장됨."""
-    raw = "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n이유: 포트폴리오 질문이 반복됨"
-    assert _parse_cluster_response(raw) == {
+    """"제안: 있음" 형식이면 대분류/소분류/이유/관련 질문 번호를 각각 뽑아내야 함
+    — 이 값들로 category_proposals의 이름·건수·샘플이 만들어짐.
+    (2026-10-28 리뷰 11번 수정으로 "관련 질문" 줄이 응답 형식에 추가됨 — 그 전엔 번호 없이 이름/이유만 받았음)"""
+    raw = "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n관련 질문: 2, 4, 5\n이유: 포트폴리오 질문이 반복됨"
+    assert _parse_cluster_response(raw, question_count=5) == {
         "major": "학과소개",
         "minor": "포트폴리오 제출",
         "reason": "포트폴리오 질문이 반복됨",
+        "question_numbers": [2, 4, 5],
     }
 
 
 def test_cluster_no_proposal_returns_none():
     """"제안: 없음"이면 None — 호출하는 쪽이 이걸 보고 no_pattern 상태로 응답함."""
-    assert _parse_cluster_response("제안: 없음") is None
+    assert _parse_cluster_response("제안: 없음", question_count=5) is None
 
 
 def test_cluster_proposal_without_category_line_returns_none():
     """"있음"이라고 해놓고 카테고리 줄을 빠뜨린 불완전한 응답은 저장하지 않고 None 처리
     — 이름 없는 제안이 관리자 화면에 뜨는 걸 막음."""
-    assert _parse_cluster_response("제안: 있음\n이유: 뭔가 있음") is None
+    assert _parse_cluster_response("제안: 있음\n관련 질문: 1, 2\n이유: 뭔가 있음", question_count=5) is None
+
+
+def test_cluster_out_of_range_and_duplicate_numbers_are_dropped():
+    """LLM이 목록에 없는 번호(0, 99)나 같은 번호를 두 번 쓰면 코드가 걸러냄 — 건수가 부풀려지거나
+    없는 질문을 샘플로 꺼내다 에러 나는 걸 막는 "검증은 코드" 지점."""
+    raw = "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n관련 질문: 0, 1, 1, 3, 99\n이유: 반복됨"
+    assert _parse_cluster_response(raw, question_count=5)["question_numbers"] == [1, 3]
+
+
+def test_cluster_proposal_without_valid_numbers_returns_none():
+    """"있음"이라면서 관련 질문 번호가 없거나 전부 범위 밖이면 근거를 확인할 수 없으므로 제안하지 않음(None)."""
+    raw = "제안: 있음\n카테고리: 학과소개 > 포트폴리오 제출\n관련 질문: 없음\n이유: 반복됨"
+    assert _parse_cluster_response(raw, question_count=5) is None

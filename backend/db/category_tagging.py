@@ -119,3 +119,31 @@ async def tag_question(question_id: int, question_text: str, answer_text: str) -
             )
     except Exception as e:  # noqa: BLE001 — 백그라운드 태스크 실패가 메인 요청에 전파되면 안 됨
         print(f"[category_tagging] question_id={question_id} 분류 실패: {e}")
+
+
+async def retag_etc_questions() -> int:
+    """기타>기타로 분류돼 있는 질문 전부를 지금의 카테고리 목록으로 다시 분류. 다시 분류한 질문 수를 반환.
+
+    카테고리 제안을 승인한 직후 admin_api.py가 백그라운드로 호출함(2026-10-28 결정). 이유:
+    승인으로 새 카테고리가 생겨도, 그 제안을 만들게 한 원래 질문들은 계속 기타에 남아 있었음 —
+    그래서 ① 새 카테고리 질문 수가 0으로 보이고 ② 다음 "카테고리 제안 확인하기"에서 같은 질문들로
+    또 같은 주제를 판단하게 됨. 각 질문은 tag_question과 똑같이(LLM이 고르고 코드가 검증) 처리되므로,
+    새 카테고리에 안 맞는 질문은 그대로 기타에 남음.
+
+    질문마다 LLM을 1번씩 부르므로 질문이 많으면 오래 걸림 — 그래서 승인 응답을 기다리게 하지 않고 백그라운드로 돌림."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT q.id, q.question_text, q.answer_text
+            FROM questions q
+            JOIN categories c ON c.id = q.category_id
+            WHERE c.major = $1 AND c.minor = $2
+            ORDER BY q.id
+            """,
+            FALLBACK_MAJOR,
+            FALLBACK_MINOR,
+        )
+    for row in rows:
+        await tag_question(row["id"], row["question_text"], row["answer_text"] or "")
+    return len(rows)
