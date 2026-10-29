@@ -19,9 +19,13 @@ from search_past_answers import search_past_answers as _search_past_answers
 mcp = FastMCP("rag-search-server")
 
 
+# ⚠️ 아래 docstring은 주석이 아니라 LLM이 받는 "도구 설명" — FastMCP가 그대로 보내고, LLM은 이걸 보고 이 도구를 쓸지 판단함.
+# (2026-10-29 학교 실측 B3) 전엔 "학과 공식 문서에서 찾는다"뿐이라 실제 Qwen3가 기숙사 신청 질문을 "학과 문서 범위 밖"으로 보고
+# 검색 없이 "학과 사무실로 문의하세요"로 답했음(5번 중 0번 검색 — 시스템 프롬프트 1-1번에 "기숙사도 검색"을 넣어도 도구 설명을 따름).
+# 학교생활 범위를 괄호로 적었더니 5번 중 5번 검색. 문서에 있는 주제가 늘면 여기도 같이 늘릴 것(tests/test_tool_descriptions.py).
 @mcp.tool()
 async def search_documents(query: str) -> list[dict]:
-    """학과 공식 문서에서 질문과 관련된 내용을 하이브리드(벡터+키워드) 검색으로 찾는다."""
+    """학과 공식 문서(입학·전형·학비·장학·기숙사·교육과정·취업 등 학교생활 전반 포함)에서 질문과 관련된 내용을 하이브리드(벡터+키워드) 검색으로 찾는다."""
     return await _search_documents(query)
 
 
