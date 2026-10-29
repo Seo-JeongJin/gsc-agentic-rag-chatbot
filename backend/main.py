@@ -5,6 +5,7 @@ FastAPI 진입점 — HTTP 요청을 받아 가드레일→세션처리→메모
 """
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,8 +24,7 @@ from db.log_service import save_log, save_question_embedding, set_rating
 from db.memory_service import fetch_recent_history
 from db.session_service import process_session, reset_conversation
 from llm_client import LLMError
-from output_guardrail import build_grounded_context, check_output
-from system_prompt import ESCALATION_CONTACT_MESSAGE
+from output_guardrail import build_grounded_context, find_unsupported_numbers, review_answer
 
 # uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
 logger = logging.getLogger("uvicorn.error")
@@ -140,26 +140,39 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     guardrail_passed = None
 
     # 13번: 출력 가드레일 — 루프가 이미 상한도달로 폴백 문구를 낸 경우는 검사할 "진짜 답변"
-    # 자체가 없어서 스킵(needs_review가 이미 True). 진짜 답변이 나온 경우만 근거비교.
-    # 근거 = 고정 사실(연락처·취업실적) + 이전 턴 + 이번 질문 + 이번 루프의 검색 결과 본문(build_grounded_context 참고).
-    # (2026-10-28 리뷰 4번: 전엔 SYSTEM_PROMPT 전체를 근거로 넣어서 판별력이 거의 없었음)
-    # 도구를 한 번도 안 쓴 답변(거절·안내 등)만 키워드 겹침 검사를 생략하고 숫자만 검사(2차 리뷰 1번 — check_output 참고).
-    # 기준이 "검색 결과가 비었는지"가 아니라 "도구를 썼는지"인 이유(3차 리뷰 1번): 검색했는데 0건/실패한 뒤 LLM이 지어낸
-    # 답이 환각이 가장 잘 나는 경우라 이건 반드시 검사해야 함 — 전엔 결과가 비었다는 이유로 그대로 통과했음.
-    # 근거의 이전 대화는 LLM에 실제로 보낸(줄인) 것으로(3차 리뷰 5번).
+    # 자체가 없어서 스킵(needs_review가 이미 True). 진짜 답변이 나온 경우만 검토.
+    # (2026-10-29 학교 실측) 코드 키워드 검사가 정답을 연락처 문구로 바꿔치기해서 → LLM 검토 + **감시 모드**로 바꿈:
+    # - 어떤 판정이 나와도 답(answer_text)은 바꾸지 않음. 검토 정확도를 실측으로 확인한 뒤 막을지 정함.
+    # - verdict=fail → guardrail_passed=FALSE로 기록만(과거답변 검색·숏텀 메모리에서 빠짐). "답변 못한 질문"엔 안 올림 —
+    #   정확도를 모르는 판정으로 정답까지 쌓이면 관리자가 목록을 안 보게 됨.
+    # - info_question=true AND answered=false(입학 정보를 물었는데 "확인해드리기 어렵습니다"처럼 답을 못 줌)
+    #   → needs_review=TRUE(insufficient_info) — 관리자가 대시보드에서 "챗봇이 이 질문엔 답을 못 한다"를 알아야 하므로
+    #   (2026-10-29 결정, 2차 리뷰 R2 해결). 인사·잡담·거절(info_question=false)은 답이 없어도 정상이라 안 올림 —
+    #   실측에서 이걸 안 나눴더니 "반가워요"·인젝션 거절이 목록에 쌓여 진짜 못 한 질문이 묻혔음.
+    # - 판정을 못 얻으면(호출 실패·형식 깨짐) guardrail_passed=NULL("검토 안 됨").
+    # 숫자 검사는 막지 않고 LLM 판정과 나란히 로그에만 남김 — 실측 후 둘 중 어느 쪽이 거짓말을 잡는지 비교하기 위함.
     if not needs_review:
-        grounded_context = build_grounded_context(
-            result["retrieved_context"], result["history_used"], payload.question_text
+        review_started = time.perf_counter()
+        review = await review_answer(payload.question_text, answer_text, result["retrieved_context"])
+        review_ms = (time.perf_counter() - review_started) * 1000
+        unsupported_numbers = find_unsupported_numbers(
+            answer_text, build_grounded_context(result["retrieved_context"], payload.question_text)
         )
-        guardrail_passed, fail_reason = check_output(
-            answer_text, grounded_context, check_overlap=result["tool_call_count"] > 0
+        if review is not None:
+            guardrail_passed = review["verdict"] == "pass"
+            unanswered = review["info_question"] and not review["answered"]
+            if unanswered:
+                needs_review = True
+                review_reason = "insufficient_info"
+        logger.info(
+            "출력 검토(감시) — verdict=%s info_question=%s answered=%s reason=%s | 숫자검사(기록용) 근거없는 숫자=%s"
+            " | 검토 %.0fms | 도구 %d회",
+            review and review["verdict"], review and review["info_question"], review and review["answered"],
+            review and review["reason"], sorted(unsupported_numbers), review_ms, result["tool_call_count"],
         )
-        if not guardrail_passed:
-            # 실패 사유를 로그로 남김 — 전엔 버려져서 나중에 가드레일을 튜닝(하네스)할 재료가 없었음
-            logger.warning("출력 가드레일 실패 — %s | 질문: %s | 원래 답변: %s", fail_reason, payload.question_text, answer_text)
-            answer_text = ESCALATION_CONTACT_MESSAGE
-            needs_review = True
-            review_reason = "guardrail_failed"
+        # 의심 사례만 질문·답변 원문을 남김 — 실측 기록(하네스 재료)용. 정상 답변까지 원문을 다 찍으면 로그가 너무 커짐.
+        if review is None or review["verdict"] == "fail" or needs_review or unsupported_numbers:
+            logger.warning("출력 검토 확인 필요 | 질문: %s | 답변: %s", payload.question_text, answer_text)
 
     # 14번: 로그 저장 — 반환된 id를 프론트에 같이 내려줘야 나중에 /api/rate가 "어느 질문"인지 알 수 있음
     question_id = await save_log(

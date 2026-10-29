@@ -206,8 +206,8 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
     반환값: {"answer_text", "tool_call_count", "needs_review", "review_reason", "retrieved_context", "history_used"}
     needs_review/review_reason은 questions 테이블 스키마와 그대로 맞춰둔 형태 — main.py가
     이 값을 그대로 save_log()에 넘기면 됨. retrieved_context는 출력 가드레일용 근거(검색 결과 본문),
-    history_used는 길이 상한으로 줄인 뒤 LLM에 "실제로 보낸" 이전 대화(가드레일 근거도 이걸로 — LLM이 못 본 내용으로
-    답을 통과시키지 않게, 3차 리뷰 5번).
+    history_used는 길이 상한으로 줄인 뒤 LLM에 "실제로 보낸" 이전 대화(3차 리뷰 5번). 2026-10-29부터 출력 검토는
+    이전 대화를 근거로 쓰지 않아서(이번 턴 검색 결과만) main.py는 이 값을 안 씀 — 디버깅·테스트용으로 남겨둠.
     LLM 서버 자체가 실패하면(재시도까지 다 실패) llm_client.LLMError가 그대로 올라감 — main.py가 503으로 처리.
     """
     tools = mcp_client.get_cached_tools()  # 0번 단계에서 캐싱해둔 도구 목록

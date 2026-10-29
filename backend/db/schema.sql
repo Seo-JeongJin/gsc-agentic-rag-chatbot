@@ -70,9 +70,9 @@ CREATE TABLE questions (
   answer_text      TEXT,                             -- 최종적으로 사용자에게 나간 답변 원문.
   category_id      INTEGER REFERENCES categories(id),-- 이 질문이 분류된 카테고리. FK로 걸어서, 존재하지 않거나(오타) 관리되지 않는 카테고리로 잘못 태깅되는 걸 DB 차원에서 막음.
   tool_call_count  INTEGER NOT NULL DEFAULT 0,        -- 이 질문을 처리하며 Agent 루프가 MCP 도구를 호출한 횟수. 루프가 얼마나 자주 여러 번 도는지 보는 운영 지표 + 디버깅용.
-  guardrail_passed BOOLEAN,                           -- 출력 가드레일(답변이 검색문서에 근거하는지) 통과 여부. NULL = 가드레일이 애초에 실행되지 않음(예: 루프 상한 도달로 조기종료), TRUE/FALSE = 실제로 실행된 결과.
+  guardrail_passed BOOLEAN,                           -- 출력 가드레일(답변이 검색문서에 근거하는지) 통과 여부. NULL = 가드레일이 애초에 실행되지 않음(예: 루프 상한 도달로 조기종료) 또는 검토 LLM 판정을 못 얻음(2026-10-29~), TRUE/FALSE = 검토 LLM의 판정(감시 모드라 FALSE여도 답변은 그대로 나감).
   needs_review     BOOLEAN NOT NULL DEFAULT FALSE,    -- 관리자가 직접 검토해야 하는 질문인지 표시하는 플래그. 대시보드의 "답변하지 못한 질문" 위젯이 이걸로 필터링.
-  review_reason    TEXT,                              -- needs_review가 TRUE인 이유. 'insufficient_info'(루프 상한까지 써도 정보 부족) 또는 'guardrail_failed'(출력 가드레일 실패로 답변이 안전문구로 교체됨).
+  review_reason    TEXT,                              -- needs_review가 TRUE인 이유. 'insufficient_info'(루프 상한까지 써도 정보 부족, 또는 2026-10-29~ 검토 LLM이 "답을 못 줌"(answered=false)으로 판정) 또는 'guardrail_failed'(2026-10-29 전까지: 출력 가드레일 실패로 답변이 안전문구로 교체됨 — 감시 모드 도입 후엔 새로 안 생김).
   user_rating      SMALLINT,                           -- 사용자가 답변에 대해 남긴 평가(1~5). 평가 안 하면 NULL. 대시보드의 "사용자 평가" 위젯 재료.
   embedding        vector(1024),                       -- question_text의 임베딩. search_past_answers가 "비슷한 과거 질문"을 찾을 때 사용(롱텀메모리).
   content_tsv      tsvector GENERATED ALWAYS AS (to_tsvector('simple', question_text)) STORED,

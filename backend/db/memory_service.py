@@ -20,6 +20,12 @@ async def fetch_recent_history(session_id: str, limit: int = DEFAULT_HISTORY_LIM
     """
     같은 세션의 최근 질문/답변을, (24시간 이내) AND (마지막 리셋 이후)인 것만
     시간순(오래된 것 → 최신 것)으로 정렬해 반환.
+
+    (2026-10-29 학교 실측) "답을 못 준 답변"(needs_review=TRUE — "확인해드리기 어렵습니다", 루프 상한 폴백)과
+    "출력 검토 실패 답변"(guardrail_passed=FALSE)은 뺌. 같은 세션에 "모른다" 답이 쌓이면 실제 Qwen3가 그걸 따라
+    다음 질문(입학 정원)까지 검색 없이 "답변드리기 어렵습니다"로 답했음(새 세션에선 3/3 정상).
+    검토가 안 된 답변(NULL — 검토 호출 실패, 검토 도입 전 기록)은 남김: 판정이 없을 뿐 나쁜 답이라는 근거가 없음.
+    대가: 사용자가 "이런 것도 답 못해요?"처럼 못 받은 답에 이어 물으면 LLM은 그 직전 턴을 못 봄 — 오염 방지가 더 중요하다고 판단.
     반환 형식은 OpenAI 호환 chat 메시지 리스트(role/content) — agent_loop가 그대로
     대화기록 맨 앞에 이어붙여 LLM에게 보낼 수 있게.
     """
@@ -32,6 +38,8 @@ async def fetch_recent_history(session_id: str, limit: int = DEFAULT_HISTORY_LIM
             JOIN sessions s ON s.session_id = q.session_id
             WHERE q.session_id = $1
               AND q.answer_text IS NOT NULL
+              AND q.needs_review = FALSE
+              AND q.guardrail_passed IS NOT FALSE
               AND q.created_at > now() - interval '1 hour' * $2
               AND q.created_at > COALESCE(s.conversation_reset_at, '-infinity'::timestamptz)
             ORDER BY q.created_at DESC
