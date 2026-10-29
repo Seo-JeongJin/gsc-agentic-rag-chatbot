@@ -33,5 +33,8 @@ backend/static_widget/
 # 테스트 실행 시 생기는 캐시
 .pytest_cache/
 
+# 실측 테스트 결과 CSV — 실제 답변 원문이 들어가고 돌릴 때마다 쌓여서 커밋 안 함(질문 목록 questions.json은 커밋)
+field_test/results/
+
 # 색인할 학과 원본 문서를 넣는 폴더(docker-compose.yml이 mcp_server에 /data로 연결) — 문서는 공개 저장소에 안 올림
 data/
