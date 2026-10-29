@@ -4,6 +4,7 @@
 questions 테이블에 이번 질문/답변 한 건을 기록. category_id(카테고리 분류)와
 user_rating(사용자 평가)은 이 시점엔 아직 모르므로 NULL로 저장 — category_id는
 나중에 category_tagging.py가 비동기로 채우고, user_rating은 사용자가 평가를 남길 때 별도 API로 채움.
+(2026-10-29) 출력 검토 결과(guardrail_passed 등)도 마찬가지로 저장 시점엔 모름 → 백그라운드 검토가 update_review_result로 채움.
 """
 
 from db.connection import get_pool
@@ -40,6 +41,20 @@ async def save_log(
             review_reason,
         )
         return row["id"]
+
+
+async def update_review_result(
+    question_id: int, guardrail_passed: bool | None, needs_review: bool, review_reason: str | None
+) -> None:
+    """출력 검토 결과를 나중에 채움 (2026-10-29) — 검토가 생각모드로 2~10초 걸려서 응답 뒤 백그라운드로 옮겼기 때문에,
+    save_log 시점엔 guardrail_passed=NULL("아직 검토 안 됨")로 저장되고 검토가 끝나면 여기서 갱신됨.
+    needs_review/review_reason은 schema.sql의 CHECK 제약(둘이 함께 바뀌어야 함)을 지키도록 항상 같이 씀."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE questions SET guardrail_passed=$2, needs_review=$3, review_reason=$4 WHERE id=$1",
+            question_id, guardrail_passed, needs_review, review_reason,
+        )
 
 
 async def save_question_embedding(question_id: int, embedding: list[float]) -> None:

@@ -34,6 +34,7 @@ API_URL = os.environ.get("FIELD_TEST_API", "http://localhost:8080/api/ask")
 CONTACT_PATTERNS = ["053-940-5441", "053) 940-5441", "@gsc.yju", "gsc.yju"]  # 학과 연락처 안내가 들어갔는지 판단용
 SESSION_PREFIX = "fieldtest"
 REQUEST_TIMEOUT = 150.0  # 긴 절차 설명은 실측 7초 안팎 — LLM 재시도까지 감안해 넉넉히
+REVIEW_WAIT_SECONDS = 30.0  # 백그라운드 출력 검토(생각모드, 실측 2~10초)가 끝나길 기다리는 최대 시간
 
 
 def _db_url() -> str:
@@ -82,6 +83,20 @@ def check(expect: dict, answer: str, row: dict | None) -> dict:
     return result
 
 
+async def wait_for_review(conn, qid: int) -> dict:
+    """출력 검토가 끝날 때까지 기다렸다가 질문 행을 읽음 (2026-10-29 — 검토가 응답 뒤 백그라운드로 옮겨짐).
+    응답 직후엔 guardrail_passed가 아직 NULL이라 바로 읽으면 "답변 못한 질문" 표시 체크가 전부 틀린 것으로 나옴.
+    needs_review=TRUE인데 NULL이면 루프 상한 폴백(검토 대상 아님)이라 안 기다림. 검토 호출이 실패하면 계속 NULL이라
+    REVIEW_WAIT_SECONDS까지만 기다리고 그대로 읽음."""
+    sql = "SELECT tool_call_count, guardrail_passed, needs_review, review_reason FROM questions WHERE id=$1"
+    deadline = time.perf_counter() + REVIEW_WAIT_SECONDS
+    while True:
+        row = await conn.fetchrow(sql, qid)
+        if row["guardrail_passed"] is not None or row["needs_review"] or time.perf_counter() > deadline:
+            return row
+        await asyncio.sleep(0.5)
+
+
 async def ask(client: httpx.AsyncClient, question: str, session_id: str) -> tuple[dict, float]:
     """/api/ask 한 번 호출 → (응답 JSON, 걸린 초). 위젯과 같은 경로로 보내야 실제 사용자가 겪는 결과와 같음."""
     started = time.perf_counter()
@@ -112,8 +127,7 @@ async def main(repeat: int, only: set[str] | None) -> None:
                 answer = response.get("answer_text") or ""
                 row = None
                 if qid is not None:
-                    row = await conn.fetchrow(
-                        "SELECT tool_call_count, guardrail_passed, needs_review, review_reason FROM questions WHERE id=$1", qid)
+                    row = await wait_for_review(conn, qid)
                 record = {
                     "run": run, "id": item["id"], "category": item["category"],
                     "prior_turns": " / ".join(item["turns"][:-1]), "question": item["turns"][-1],

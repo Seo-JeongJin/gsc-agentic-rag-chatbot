@@ -82,6 +82,17 @@ async def test_complete_always_turns_thinking_off(monkeypatch):
     assert "tools" not in body
 
 
+async def test_complete_can_turn_thinking_on_for_answer_review(monkeypatch):
+    """[2026-10-29 실측] 출력 검토만 예외로 생각모드를 켬 — 꺼진 상태로는 지어낸 답(편입 가능 단정 등)을 20번 중 0번 잡았고,
+    켜면 오탐 없이 편입 5/5·틀린 자격 판정 3/5를 잡았음. 생각 과정은 지워지고 JSON 판정만 돌아와야 함."""
+    sent = _install_fake_vllm(monkeypatch, lambda req: _chat_response(content='<think>근거 대조…</think>{"verdict": "fail"}'))
+
+    result = await llm_client.complete("프롬프트", mock=_unused_mock, thinking=True)
+
+    assert "chat_template_kwargs" not in json.loads(sent[0].content)
+    assert result == '{"verdict": "fail"}'
+
+
 # ----- 응답 처리 -----
 
 

@@ -148,13 +148,15 @@ async def chat(
     }
 
 
-async def complete(prompt: str, *, mock: CompleteMock) -> str:
-    """단발성 호출용(카테고리 분류/로그 요약/카테고리 제안) — 프롬프트 하나 보내고 텍스트 하나 받음.
-    도구 없음, **생각모드 항상 끔**(정해진 형식으로 짧게 답해야 하는 호출이라 생각모드는 느리기만 하고 파싱 위험만 큼).
+async def complete(prompt: str, *, mock: CompleteMock, thinking: bool = False) -> str:
+    """단발성 호출용(카테고리 분류/로그 요약/카테고리 제안/질문 분류/출력 검토) — 프롬프트 하나 보내고 텍스트 하나 받음.
+    도구 없음, **생각모드는 기본 끔**(정해진 형식으로 짧게 답해야 하는 호출이라 생각모드는 느리기만 하고 파싱 위험만 큼).
+    예외: 출력 검토만 thinking=True(2026-10-29 실측 — 끄면 지어낸 답을 0/20 잡고, 켜면 오탐 없이 편입 단정 5/5). 생각 과정은
+    아래 strip_thinking으로 지우므로 파서는 끈 경우와 똑같이 판정 부분만 받음.
     빈 응답이면 LLMError — 빈 문자열을 정상 답처럼 넘기면 파서가 "형식 깨짐"과 구분을 못 함."""
     if _mode() == "mock":
         return strip_thinking(await mock(prompt)) or ""
-    message = await _vllm_chat([{"role": "user", "content": prompt}], tools=None, thinking=False)
+    message = await _vllm_chat([{"role": "user", "content": prompt}], tools=None, thinking=thinking)
     content = strip_thinking(message.get("content"))
     if not content:
         raise LLMError("LLM이 빈 응답을 돌려줌")

@@ -18,6 +18,7 @@ system_prompt.py의 고정 사실 + 이번 질문)에 바탕을 두고 있는지
   스펙의 "세 번째 모델 미도입" 결정과 충돌하지 않음. "판단은 LLM, 호출·파싱·기록은 코드" 구도.
 - 숫자 검사(find_unsupported_numbers)는 **감시용 기록으로만** 남김 — LLM 검토와 나란히 로그에 찍어 두고, 실측 후
   어느 쪽이 실제로 거짓말을 잡는지 비교해서 최종 방식을 정함.
+- 검토는 **생각모드 켬 + 응답 뒤 백그라운드**(같은 날 추가 실측 — generate_review_llm_call 설명 참고).
 - **감시 모드**: 지금은 어떤 판정이 나와도 답을 바꾸지 않음(main.py 13번 참고). 검토 정확도를 아직 모르기 때문이고,
   SSE 스트리밍 도입 후엔 답이 이미 나간 뒤에 검토가 끝나서 어차피 막을 수 없는 구조와도 맞음.
 - 근거에 이전 대화는 넣지 않음(2026-10-29 결정) — 답변 프롬프트의 1-1번("이전 대화의 답변은 근거가 아님")과 같은 원칙.
@@ -158,9 +159,11 @@ def _parse_review_response(raw: str) -> dict | None:
 
 
 async def generate_review_llm_call(prompt: str) -> str:
-    """검토 LLM 호출 — llm_client.complete(단발성, 생각모드 끔: 짧은 JSON 판정이라 빠르게)로 보냄.
+    """검토 LLM 호출 — llm_client.complete(단발성)로 보내되 **생각모드를 켬**(2026-10-29 실측).
+    끈 상태로는 "검색 결과 없이 '편입할 수 있습니다'라고 단정" 같은 지어낸 답 4개를 20번 중 0번 잡았고(숫자만 대조하고 통과),
+    켜면 정상 답 오탐 0/20에 편입 단정 5/5·틀린 자격 판정 3/5를 잡음. 대가는 2~10초 → main.py가 응답 뒤 백그라운드로 돌림.
     LLM_MODE=mock이면 아래 가짜 응답을 씀. 테스트가 이 함수를 바꿔치기해서 "검토 LLM이 이렇게 판정하면?"을 흉내 냄."""
-    return await llm_client.complete(prompt, mock=_mock_review_response)
+    return await llm_client.complete(prompt, mock=_mock_review_response, thinking=True)
 
 
 async def _mock_review_response(prompt: str) -> str:

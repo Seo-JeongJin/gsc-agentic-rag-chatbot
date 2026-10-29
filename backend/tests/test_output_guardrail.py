@@ -128,6 +128,22 @@ async def test_review_returns_none_when_llm_fails(monkeypatch):
     assert await review_answer("입학 정원이 몇명이냐", CAPACITY_ANSWER, CAPACITY_CONTEXT) is None
 
 
+async def test_review_llm_call_uses_thinking_mode(monkeypatch):
+    """[2026-10-29 실측] 검토 호출은 생각모드를 켜야 함 — 끈 상태로는 지어낸 답 4개를 20번 중 0번 잡았고, 켜면 오탐 없이
+    편입 단정 5/5·틀린 자격 판정 3/5를 잡았음(실측_버그기록.md "검토 방식 바꾸기")."""
+    seen = []
+
+    async def fake_complete(prompt, *, mock, thinking=False):
+        seen.append(thinking)
+        return '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}'
+
+    monkeypatch.setattr(llm_client, "complete", fake_complete)
+
+    await output_guardrail.generate_review_llm_call("프롬프트")
+
+    assert seen == [True]
+
+
 async def test_review_parses_llm_output(monkeypatch):
     """review_answer가 LLM 응답을 파싱해서 돌려주는지 — 끝에서 끝으로 한 번."""
     async def fake_call(prompt):

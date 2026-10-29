@@ -220,6 +220,51 @@ CAPACITY_ANSWER = (
 )
 
 
+async def test_review_runs_after_the_answer_is_saved(client, db, monkeypatch):
+    """[2026-10-29 실측] 출력 검토를 생각모드로 바꾸면서(지어낸 답을 잡으려면 필요, 2~10초) 응답 뒤 백그라운드로 옮김 —
+    사용자는 검토를 기다리지 않음. 검토 LLM이 불릴 때 이미 질문 행이 "검토 전(guardrail_passed=NULL)"으로 저장돼 있어야 하고,
+    검토가 끝나면 결과로 갱신돼야 함. 수정 전엔 검토가 저장보다 먼저라 이 시점에 행이 없었음."""
+    import output_guardrail
+
+    seen_at_review = []
+
+    async def fake_call(prompt):
+        seen_at_review.append(await db.fetchval("SELECT COUNT(*) FROM questions WHERE guardrail_passed IS NULL"))
+        return '{"verdict": "fail", "info_question": true, "answered": true, "reason": "테스트"}'
+
+    monkeypatch.setattr(output_guardrail, "generate_review_llm_call", fake_call)
+
+    qid = (await _ask(client, "기숙사 신청 방법 알려주세요"))["question_id"]
+
+    assert seen_at_review == [1]
+    assert await db.fetchval("SELECT guardrail_passed FROM questions WHERE id=$1", qid) is False
+
+
+async def test_escalated_answer_is_not_reviewed(client, db, monkeypatch):
+    """루프 상한에 걸려 연락처 고정 문구로 끝난 답은 검토할 "진짜 답변"이 없으므로 검토 LLM을 부르지 않음(백그라운드로 옮겨도 그대로)."""
+    import agent_loop
+    import output_guardrail
+
+    calls = []
+
+    async def fake_call(prompt):
+        calls.append(prompt)
+        return '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}'
+
+    async def always_tool(messages, tools, thinking):
+        return {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "search_documents", "arguments": "{\"query\": \"x\"}"}}]}
+
+    monkeypatch.setattr(output_guardrail, "generate_review_llm_call", fake_call)
+    monkeypatch.setattr(agent_loop, "generate_llm_response", always_tool)
+
+    data = await _ask(client, "기숙사 신청 방법 알려주세요")
+
+    assert calls == []
+    row = await db.fetchrow("SELECT needs_review, review_reason, guardrail_passed FROM questions WHERE id=$1", data["question_id"])
+    assert (row["needs_review"], row["review_reason"], row["guardrail_passed"]) == (True, "insufficient_info", None)
+
+
 async def test_correct_answer_is_not_replaced_by_keyword_check(client, db, monkeypatch):
     """[2026-10-29 실측 버그 재현] 검색 결과에 맞는 정답인데, 조사·말투 때문에 키워드 겹침이 27%로 기준(30%) 미만이라
     "정확한 답변을 드리기 어렵습니다"로 바뀌어 나갔음. 이제 키워드 검사는 없고 검토 LLM(가짜: pass)이 판정 → 답 그대로."""

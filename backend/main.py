@@ -20,7 +20,7 @@ import guardrail
 import mcp_client
 from admin_api import router as admin_router
 from db.category_tagging import tag_question
-from db.log_service import save_log, save_question_embedding, set_rating
+from db.log_service import save_log, save_question_embedding, set_rating, update_review_result
 from db.memory_service import fetch_recent_history
 from db.session_service import process_session, reset_conversation
 from llm_client import LLMError
@@ -112,6 +112,55 @@ async def store_question_embedding(question_id: int, question_text: str) -> None
         logger.warning("질문 임베딩 저장 실패(question_id=%s): %s", question_id, e)
 
 
+async def review_in_background(
+    question_id: int, question_text: str, answer_text: str, retrieved_context: str, tool_call_count: int
+) -> None:
+    """13번 출력 가드레일(백그라운드) — 응답을 보낸 "뒤에" 검토 LLM으로 답을 검토하고 결과를 DB에 채움.
+
+    (2026-10-29 학교 실측) 코드 키워드 검사가 정답을 연락처 문구로 바꿔치기해서 → LLM 검토 + **감시 모드**로 바꿈.
+    같은 날 추가 실측으로 검토를 생각모드로 바꿨고(끄면 지어낸 답 0/20, 켜면 오탐 없이 편입 단정 5/5) 그 대가가 2~10초라,
+    사용자를 기다리게 하지 않으려고 응답 뒤로 옮김. 감시 모드라 원래 검토 결과가 답을 바꾸지 않으므로 사용자가 보는 건 같음.
+    SSE 도입 후엔 답이 스트리밍된 뒤에 검토가 끝나는 구조와도 그대로 맞음.
+    - verdict=fail → guardrail_passed=FALSE로 기록만(과거답변 검색·숏텀 메모리에서 빠짐). "답변 못한 질문"엔 안 올림 —
+      정확도를 모르는 판정으로 정답까지 쌓이면 관리자가 목록을 안 보게 됨.
+    - info_question=true AND answered=false(입학 정보를 물었는데 "확인해드리기 어렵습니다"처럼 답을 못 줌)
+      → needs_review=TRUE(insufficient_info) — 관리자가 "챗봇이 이 질문엔 답을 못 한다"를 알아야 하므로(2차 리뷰 R2 해결).
+      인사·잡담·거절(info_question=false)은 답이 없어도 정상이라 안 올림(B6).
+    - 판정을 못 얻으면(호출 실패·형식 깨짐) guardrail_passed=NULL("검토 안 됨") 그대로.
+    - 숫자 검사는 막지 않고 LLM 판정과 나란히 로그에만 남김 — 실측 후 비교하기 위함.
+    - 과거답변 검색용 임베딩(15-2번)도 여기로 옮김: "정상 답변 + 검토 통과"인 질문만 저장하는데(2026-10-28 결정),
+      검토 결과가 이 함수 안에서 나오기 때문.
+    대가: 검토가 끝나기 전(몇 초)에 같은 세션의 다음 질문이 오면, 숏텀 메모리는 이 답을 "검토 안 됨"으로 보고 포함함.
+    실패해도 예외를 밖으로 던지지 않음 — 이미 답변은 나간 뒤라 서비스에 영향이 없게."""
+    try:
+        review_started = time.perf_counter()
+        review = await review_answer(question_text, answer_text, retrieved_context)
+        review_ms = (time.perf_counter() - review_started) * 1000
+        unsupported_numbers = find_unsupported_numbers(answer_text, build_grounded_context(retrieved_context, question_text))
+
+        guardrail_passed, needs_review, review_reason = None, False, None
+        if review is not None:
+            guardrail_passed = review["verdict"] == "pass"
+            if review["info_question"] and not review["answered"]:
+                needs_review, review_reason = True, "insufficient_info"
+            await update_review_result(question_id, guardrail_passed, needs_review, review_reason)
+
+        logger.info(
+            "출력 검토(감시) — question_id=%s verdict=%s info_question=%s answered=%s reason=%s"
+            " | 숫자검사(기록용) 근거없는 숫자=%s | 검토 %.0fms | 도구 %d회",
+            question_id, review and review["verdict"], review and review["info_question"], review and review["answered"],
+            review and review["reason"], sorted(unsupported_numbers), review_ms, tool_call_count,
+        )
+        # 의심 사례만 질문·답변 원문을 남김 — 실측 기록(하네스 재료)용. 정상 답변까지 원문을 다 찍으면 로그가 너무 커짐.
+        if review is None or review["verdict"] == "fail" or needs_review or unsupported_numbers:
+            logger.warning("출력 검토 확인 필요 | question_id=%s | 질문: %s | 답변: %s", question_id, question_text, answer_text)
+
+        if guardrail_passed and not needs_review:
+            await store_question_embedding(question_id, question_text)
+    except Exception as e:  # noqa: BLE001 — 백그라운드 실패가 서비스에 영향 주면 안 됨
+        logger.warning("출력 검토(백그라운드) 실패(question_id=%s): %s", question_id, e)
+
+
 @app.post("/api/ask", response_model=AskResponse)
 async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
     # 1번: 요청 수신 (FastAPI+Pydantic이 이미 question_text/session_id 형식 검증을 끝낸 상태)
@@ -148,50 +197,14 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     answer_text = result["answer_text"]
     needs_review = result["needs_review"]
     review_reason = result["review_reason"]
-    guardrail_passed = None
-
-    # 13번: 출력 가드레일 — 루프가 이미 상한도달로 폴백 문구를 낸 경우는 검사할 "진짜 답변"
-    # 자체가 없어서 스킵(needs_review가 이미 True). 진짜 답변이 나온 경우만 검토.
-    # (2026-10-29 학교 실측) 코드 키워드 검사가 정답을 연락처 문구로 바꿔치기해서 → LLM 검토 + **감시 모드**로 바꿈:
-    # - 어떤 판정이 나와도 답(answer_text)은 바꾸지 않음. 검토 정확도를 실측으로 확인한 뒤 막을지 정함.
-    # - verdict=fail → guardrail_passed=FALSE로 기록만(과거답변 검색·숏텀 메모리에서 빠짐). "답변 못한 질문"엔 안 올림 —
-    #   정확도를 모르는 판정으로 정답까지 쌓이면 관리자가 목록을 안 보게 됨.
-    # - info_question=true AND answered=false(입학 정보를 물었는데 "확인해드리기 어렵습니다"처럼 답을 못 줌)
-    #   → needs_review=TRUE(insufficient_info) — 관리자가 대시보드에서 "챗봇이 이 질문엔 답을 못 한다"를 알아야 하므로
-    #   (2026-10-29 결정, 2차 리뷰 R2 해결). 인사·잡담·거절(info_question=false)은 답이 없어도 정상이라 안 올림 —
-    #   실측에서 이걸 안 나눴더니 "반가워요"·인젝션 거절이 목록에 쌓여 진짜 못 한 질문이 묻혔음.
-    # - 판정을 못 얻으면(호출 실패·형식 깨짐) guardrail_passed=NULL("검토 안 됨").
-    # 숫자 검사는 막지 않고 LLM 판정과 나란히 로그에만 남김 — 실측 후 둘 중 어느 쪽이 거짓말을 잡는지 비교하기 위함.
-    if not needs_review:
-        review_started = time.perf_counter()
-        review = await review_answer(payload.question_text, answer_text, result["retrieved_context"])
-        review_ms = (time.perf_counter() - review_started) * 1000
-        unsupported_numbers = find_unsupported_numbers(
-            answer_text, build_grounded_context(result["retrieved_context"], payload.question_text)
-        )
-        if review is not None:
-            guardrail_passed = review["verdict"] == "pass"
-            unanswered = review["info_question"] and not review["answered"]
-            if unanswered:
-                needs_review = True
-                review_reason = "insufficient_info"
-        logger.info(
-            "출력 검토(감시) — verdict=%s info_question=%s answered=%s reason=%s | 숫자검사(기록용) 근거없는 숫자=%s"
-            " | 검토 %.0fms | 도구 %d회",
-            review and review["verdict"], review and review["info_question"], review and review["answered"],
-            review and review["reason"], sorted(unsupported_numbers), review_ms, result["tool_call_count"],
-        )
-        # 의심 사례만 질문·답변 원문을 남김 — 실측 기록(하네스 재료)용. 정상 답변까지 원문을 다 찍으면 로그가 너무 커짐.
-        if review is None or review["verdict"] == "fail" or needs_review or unsupported_numbers:
-            logger.warning("출력 검토 확인 필요 | 질문: %s | 답변: %s", payload.question_text, answer_text)
-
-    # 14번: 로그 저장 — 반환된 id를 프론트에 같이 내려줘야 나중에 /api/rate가 "어느 질문"인지 알 수 있음
+    # 14번: 로그 저장 — 반환된 id를 프론트에 같이 내려줘야 나중에 /api/rate가 "어느 질문"인지 알 수 있음.
+    # 출력 검토 결과는 아직 모름(guardrail_passed=NULL) — 13번 검토가 응답 뒤 백그라운드로 돌고 결과를 채움(2026-10-29).
     question_id = await save_log(
         session_id=payload.session_id,
         question_text=payload.question_text,
         answer_text=answer_text,
         tool_call_count=result["tool_call_count"],
-        guardrail_passed=guardrail_passed,
+        guardrail_passed=None,
         needs_review=needs_review,
         review_reason=review_reason,
     )
@@ -199,11 +212,13 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # 15번: 카테고리 태깅 백그라운드 호출 — 분류 LLM 호출이 끝나길 기다리지 않고 바로 16번(응답)으로 넘어감.
     background_tasks.add_task(tag_question, question_id, payload.question_text, answer_text)
 
-    # 15-2번: 과거답변 검색용 질문 임베딩 저장 — 정상 답변(needs_review=False) + 출력 가드레일 통과(True)인
-    # 질문만(2026-10-28 결정). 에스컬레이션/가드레일 실패 답변은 어차피 search_past_answers의 검색 조건에서
-    # 빠지므로 임베딩을 만들 필요가 없음. 임베딩이 느릴 수 있어서 응답을 기다리게 하지 않고 백그라운드로.
-    if not needs_review and guardrail_passed:
-        background_tasks.add_task(store_question_embedding, question_id, payload.question_text)
+    # 13번(백그라운드): 출력 가드레일 검토 → 결과 갱신 → 통과했으면 15-2번(과거답변 검색용 임베딩) — review_in_background 참고.
+    # 루프가 이미 상한도달로 폴백 문구를 낸 경우(needs_review=True)는 검사할 "진짜 답변"이 없어서 검토 안 함.
+    if not needs_review:
+        background_tasks.add_task(
+            review_in_background, question_id, payload.question_text, answer_text,
+            result["retrieved_context"], result["tool_call_count"],
+        )
 
     # 16번: 응답 반환 (지금은 비스트리밍 단순 응답 — SSE 스트리밍은 실제 vLLM 연결 시 추가)
     return AskResponse(answer_text=answer_text, question_id=question_id)
