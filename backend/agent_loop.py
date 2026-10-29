@@ -12,10 +12,11 @@ LLM이 이상하게 응답해도(깨진 도구 인자, 없는 도구, 빈 답) �
 
 import json
 import logging
+import re
 
 import llm_client
 import mcp_client
-from system_prompt import ESCALATION_CONTACT_MESSAGE, FOLLOW_UP_SEARCH_REMINDER, SYSTEM_PROMPT
+from system_prompt import ESCALATION_CONTACT_MESSAGE, FOLLOW_UP_SEARCH_REMINDER, KOREAN_REWRITE_REQUEST, SYSTEM_PROMPT
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -35,6 +36,8 @@ MAX_TOOL_RESULT_CHARS_PER_CALL = 1500  # 검색 1번의 결과(JSON 포함) — 
                                        # 두 번째 검색이 문서 한 건도 못 받았음 → 검색마다 따로 배정
 MAX_TOOL_RESULT_CHARS_TOTAL = 4500     # 한 질문의 루프 동안 도구 결과 전체(검색 3번 × 1500)
 MAX_ITEM_TEXT_CHARS = 700              # 검색 결과 한 건의 본문(문서 청크 90%가 710자 이하 — 2026-10-28 실측)
+# 한자(CJK 통합 한자) 덩어리 — 답에 섞인 중국어 감지용(2026-10-29 B14). 일본어 가나는 범위 밖이라 회사명의 가나는 안 걸림
+_HAN_CHARS = re.compile(r"[\u4e00-\u9fff]+")
 _TRUNCATION_MARK = "…(생략)"         # 잘렸다는 표시 — LLM이 "일부만 본 것"을 알 수 있게
 
 
@@ -186,6 +189,37 @@ async def _run_tool_call(call: dict, allowed_tools: set[str], remaining_chars: i
     return json.dumps(fitted, ensure_ascii=False), _grounding_text(fitted)
 
 
+def _stray_chinese(answer: str, allowed_text: str) -> list[str]:
+    """답에 섞인 한자 덩어리 중 allowed_text(이번 질문 + 검색 결과)에 없는 것. 문서의 일본 회사명(株式会社 등)을 그대로 옮긴 건
+    정상이라 제외하고, 근거에 없는 한자(Qwen이 새어 나온 "客气" 같은 중국어)만 골라냄(2026-10-29 B14)."""
+    return [chunk for chunk in _HAN_CHARS.findall(answer) if chunk not in allowed_text]
+
+
+async def _rewrite_if_chinese(messages: list[dict], answer: str, allowed_text: str) -> str:
+    """최종 답에 근거 없는 한자(중국어)가 섞였으면 "무엇이 섞였는지" 알려주며 **딱 한 번** 다시 쓰게 함 (2026-10-29 실측 B14).
+
+    프롬프트에 "한국어로만"을 넣는 건 효과가 없었고(6/12 그대로), 이 방식은 10/10 고침(system_prompt.KOREAN_REWRITE_REQUEST 참고).
+    판단(어떻게 고쳐 쓸지)은 LLM, 감지·횟수 제한·실패 처리는 코드. 한 번만 하는 이유: 다시 써도 남는 경우에 호출이 끝없이 늘지 않게 —
+    그때는 다시 쓴 답을 그대로 쓰고 로그만 남김. 다시 쓰기 호출이 실패하거나 빈 답이면 원래 답을 씀(이미 답은 있으니 503으로 날리지 않음)."""
+    stray = _stray_chinese(answer, allowed_text)
+    if not stray:
+        return answer
+    request = KOREAN_REWRITE_REQUEST.format(chars=", ".join(stray))
+    try:
+        response = await generate_llm_response(
+            messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": request}], [], False
+        )
+    except llm_client.LLMError as e:
+        logger.warning("중국어 섞인 답 다시 쓰기 실패 — 원래 답 사용: %s", e)
+        return answer
+    rewritten = (response.get("content") or "").strip()
+    if not rewritten:
+        return answer
+    left = _stray_chinese(rewritten, allowed_text)
+    logger.info("중국어 섞인 답 다시 씀 — 섞인 글자 %s → 다시 쓴 뒤 %s", stray, left or "없음")
+    return rewritten
+
+
 def _escalation(tool_call_count: int, grounding_parts: list[str]) -> dict:
     """답변을 못 만든 경우의 반환값 — 연락처 안내 고정 문구 + 관리자 검토 필요(insufficient_info).
     이 문구는 LLM이 아니라 코드가 그대로 반환하는 고정 텍스트라, system_prompt.py의 [문의 안내] 지침과 별개로
@@ -242,6 +276,7 @@ async def run_agent_loop(question_text: str, history: list[dict], system_prompt:
                 # 도구도 안 부르고 답도 비어 있음 — 빈 말풍선을 내보내지 않고 연락처 안내로(리뷰 3번)
                 logger.warning("LLM이 빈 답변을 반환함 — 에스컬레이션 처리")
                 return {**_escalation(tool_call_count, grounding_parts), "history_used": history_used}
+            answer = await _rewrite_if_chinese(messages, answer, question_text + "\n" + "\n".join(grounding_parts))
             return {
                 "answer_text": answer,
                 "tool_call_count": tool_call_count,

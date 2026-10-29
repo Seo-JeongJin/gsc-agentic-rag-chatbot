@@ -346,3 +346,67 @@ async def test_long_latest_turn_is_truncated_not_dropped(fake_mcp, monkeypatch):
     assert sum(len(m["content"]) for m in sent_history) <= agent_loop.MAX_HISTORY_CHARS + 20  # 잘림 표시 몇 글자
     # 출력 가드레일은 LLM이 실제로 본(잘린) 대화로 검사해야 함 — 못 본 내용으로 통과시키지 않게
     assert result["history_used"] == sent_history
+
+
+# ----- 2026-10-29 실측 B14: 답에 중국어가 섞이면 한 번 다시 쓰게 함 -----
+
+
+def _scripted_llm(monkeypatch, replies):
+    """LLM 응답을 순서대로 돌려주는 가짜 + 받은 messages 기록 — "첫 답에 중국어 → 다시 쓰기 요청" 흐름을 재현하기 위함."""
+    seen = []
+    it = iter(replies)
+
+    async def scripted(messages, tools, thinking):
+        seen.append([dict(m) for m in messages])
+        return next(it)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", scripted)
+    return seen
+
+
+async def test_chinese_in_answer_is_rewritten_once(fake_mcp, monkeypatch):
+    """[B14 재현] "고마워요"에 Qwen이 "客气해요!"(중국어 '천만에요')로 답했음(인사 24번 중 10번). 프롬프트에 "한국어로만"을 넣어도 6/12 그대로였고,
+    "방금 답에 중국어(客气)가 섞였어요. 한국어로만 다시"를 덧붙여 다시 생성하면 10/10 없어짐 → 코드가 감지해서 딱 한 번 다시 쓰게 함."""
+    seen = _scripted_llm(monkeypatch, [
+        {"role": "assistant", "content": "客气해요! 😊 궁금한 점이 있으면 물어보세요.", "tool_calls": None},
+        {"role": "assistant", "content": "고마워요! 😊 궁금한 점이 있으면 물어보세요.", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("고마워요", history=[])
+
+    assert result["answer_text"] == "고마워요! 😊 궁금한 점이 있으면 물어보세요."
+    assert len(seen) == 2
+    assert seen[1][-2]["content"].startswith("客气해요")   # 잘못된 답을 보여주고
+    assert "客气" in seen[1][-1]["content"]                 # 무엇이 섞였는지 알려주며 다시 요청
+
+
+async def test_kanji_from_search_results_is_kept(monkeypatch):
+    """문서에 있는 일본 회사명(株式会社 등)을 그대로 옮긴 한자는 정상 — 검색 결과에 있는 한자는 다시 쓰기 대상이 아님."""
+    async def call_tool(name, arguments):
+        return [{"id": 1, "chunk_text": "TLV (株式会社テイエルブイ): 증기 계측 제조사", "source": "faq.md", "similarity": 0.7}]
+
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", call_tool)
+    seen = _scripted_llm(monkeypatch, [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "search_documents", "arguments": "{\"query\": \"TLV\"}"}}]},
+        {"role": "assistant", "content": "TLV(株式会社)는 증기 계측 제조사예요.", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("TLV는 어떤 회사예요?", history=[])
+
+    assert result["answer_text"] == "TLV(株式会社)는 증기 계측 제조사예요."
+    assert len(seen) == 2  # 검색 1번 + 답 1번 — 다시 쓰기 호출 없음
+
+
+async def test_rewrite_is_tried_only_once(fake_mcp, monkeypatch):
+    """다시 써도 중국어가 남으면 더 반복하지 않고 다시 쓴 답을 씀(호출이 끝없이 늘지 않게) — 로그에만 남김."""
+    seen = _scripted_llm(monkeypatch, [
+        {"role": "assistant", "content": "客气해요!", "tool_calls": None},
+        {"role": "assistant", "content": "不客气해요!", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("고마워요", history=[])
+
+    assert result["answer_text"] == "不客气해요!"
+    assert len(seen) == 2
