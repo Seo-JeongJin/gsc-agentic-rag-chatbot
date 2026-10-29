@@ -73,6 +73,25 @@ async def test_messages_ordered_system_history_question(fake_mcp, monkeypatch):
     assert first_call[-1]["content"] == "이번 질문"
 
 
+async def test_custom_system_prompt_replaces_default(fake_mcp, monkeypatch):
+    """[2026-10-29 B9] 개인 자격 질문은 main.py가 전용 프롬프트(ELIGIBILITY_PROMPT)를 넘김 — 넘긴 프롬프트가 기본 프롬프트
+    대신 system 메시지로 들어가야 함. 안 넘기면(None) 지금까지처럼 기본 SYSTEM_PROMPT."""
+    seen_system = []
+    original = agent_loop.generate_llm_response
+
+    async def spy(messages, tools, thinking):
+        seen_system.append(messages[0]["content"])
+        return await original(messages, tools, thinking)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
+
+    await agent_loop.run_agent_loop("이번 질문", history=[], system_prompt="전용 프롬프트")
+    await agent_loop.run_agent_loop("이번 질문", history=[])
+
+    assert seen_system[0] == "전용 프롬프트"
+    assert seen_system[-1] == agent_loop.SYSTEM_PROMPT
+
+
 async def test_loop_limit_returns_escalation_and_needs_review(fake_mcp, monkeypatch):
     """LLM이 계속 도구만 부르고 답을 안 내는 상황 — 코드가 상한(4회)에서 강제로 끊어야 함(11번 단계).
     이때 연락처 안내 문구 + 관리자 검토 필요(insufficient_info) 표시가 되는지 확인.

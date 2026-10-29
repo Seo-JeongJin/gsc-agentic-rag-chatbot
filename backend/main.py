@@ -25,6 +25,8 @@ from db.memory_service import fetch_recent_history
 from db.session_service import process_session, reset_conversation
 from llm_client import LLMError
 from output_guardrail import build_grounded_context, find_unsupported_numbers, review_answer
+from question_router import is_personal_eligibility
+from system_prompt import ELIGIBILITY_PROMPT
 
 # uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
 logger = logging.getLogger("uvicorn.error")
@@ -125,11 +127,20 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # 4번: 숏텀 메모리 조회 (루프 시작 전 1회만)
     history = await fetch_recent_history(payload.session_id)
 
+    # 4-2번: 질문 분류 (2026-10-29 학교 실측 B9) — 개인 자격 판정 질문("내신 4.2·5.8등급인데 입도선매 되나요?")이면
+    # 전용 프롬프트로 답함. 기본 프롬프트로는 모델이 직접 계산해서 틀린 판정을 냈음(question_router.py 설명 참고).
+    # 분류가 실패하면 False → 지금까지와 같은 기본 경로.
+    eligibility = await is_personal_eligibility(payload.question_text)
+    if eligibility:
+        logger.info("질문 분류: 개인 자격 판정 질문 → 전용 프롬프트 | 질문: %s", payload.question_text)
+
     # 5~12번: Agent 루프 (LLM_MODE=mock이면 가짜 LLM, vllm이면 실제 vLLM — llm_client.py)
     # LLM 서버가 재시도까지 다 실패하면 503 — 답변 자체가 없으니 로그도 안 남김(위젯은 "잠시 후 다시 시도" 표시).
     # 500이 아니라 503인 이유: 우리 코드 버그가 아니라 "GPU 서버가 일시적으로 응답 없음"이라는 뜻을 정확히 전달.
     try:
-        result = await agent_loop.run_agent_loop(payload.question_text, history)
+        result = await agent_loop.run_agent_loop(
+            payload.question_text, history, system_prompt=ELIGIBILITY_PROMPT if eligibility else None
+        )
     except LLMError as e:
         logger.error("LLM 서버 호출 실패 — 503 응답: %s", e)
         raise HTTPException(status_code=503, detail="답변 서버가 잠시 응답하지 않습니다. 잠시 후 다시 시도해 주세요.") from e

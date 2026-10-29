@@ -199,7 +199,7 @@ def _escalation(tool_call_count: int, grounding_parts: list[str]) -> dict:
     }
 
 
-async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
+async def run_agent_loop(question_text: str, history: list[dict], system_prompt: str | None = None) -> dict:
     """
     Agent 루프의 본체. 5~12번 단계를 수행.
 
@@ -209,13 +209,16 @@ async def run_agent_loop(question_text: str, history: list[dict]) -> dict:
     history_used는 길이 상한으로 줄인 뒤 LLM에 "실제로 보낸" 이전 대화(3차 리뷰 5번). 2026-10-29부터 출력 검토는
     이전 대화를 근거로 쓰지 않아서(이번 턴 검색 결과만) main.py는 이 값을 안 씀 — 디버깅·테스트용으로 남겨둠.
     LLM 서버 자체가 실패하면(재시도까지 다 실패) llm_client.LLMError가 그대로 올라감 — main.py가 503으로 처리.
+    system_prompt: 기본(None)은 SYSTEM_PROMPT. 개인 자격 판정 질문은 main.py가 ELIGIBILITY_PROMPT를 넘김(2026-10-29 B9 —
+    question_router.py 참고). 기본값을 함수 정의가 아니라 실행 시점에 정하는 이유: 실험·테스트에서 모듈의 SYSTEM_PROMPT를
+    바꿔 끼웠을 때 그 값이 그대로 쓰이게.
     """
     tools = mcp_client.get_cached_tools()  # 0번 단계에서 캐싱해둔 도구 목록
     allowed_tools = {t["function"]["name"] for t in tools if "function" in t}
 
     # 5번: 시스템 프롬프트 + 4번에서 가져온 과거 대화(길이 상한 안으로 줄여서) + 이번 질문을 합쳐 대화기록 구성
     messages: list[dict] = (
-        [{"role": "system", "content": SYSTEM_PROMPT}]
+        [{"role": "system", "content": system_prompt or SYSTEM_PROMPT}]
         + (history_used := _trim_history(history))
         + [{"role": "user", "content": question_text}]
     )

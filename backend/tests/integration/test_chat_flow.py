@@ -284,6 +284,36 @@ async def test_greeting_or_refusal_is_not_flagged_even_if_not_answered(client, d
     assert (row["guardrail_passed"], row["needs_review"]) == (True, False)
 
 
+async def test_personal_eligibility_question_uses_dedicated_prompt(client, db, monkeypatch):
+    """[2026-10-29 실측 B9] 개인 자격 질문("내신 4.2·5.8등급인데 입도선매 되나요?")은 분류 LLM이 YES → 전용 프롬프트로 답변.
+    기본 프롬프트로는 모델이 직접 계산해서 "충족하지 못합니다"라고 틀린 판정을 냈음(실제론 평균 5.0으로 자격 됨).
+    일반 질문(분류 NO)은 지금까지처럼 기본 프롬프트."""
+    import agent_loop
+    import question_router
+    from system_prompt import ELIGIBILITY_PROMPT, SYSTEM_PROMPT
+
+    seen_system = []
+    original = agent_loop.generate_llm_response
+
+    async def spy(messages, tools, thinking):
+        seen_system.append(messages[0]["content"])
+        return await original(messages, tools, thinking)
+
+    async def router(prompt):
+        return "YES" if "4.2등급" in prompt else "NO"
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
+    monkeypatch.setattr(question_router, "generate_router_llm_call", router)
+
+    await _ask(client, "내신이 두 학기 4.2등급, 5.8등급인데 입도선매 자격이 되나요?", session_id="s-elig")
+    eligibility_prompts = list(seen_system)
+    seen_system.clear()
+    await _ask(client, "입도선매 자격 조건이 뭐예요?", session_id="s-general")
+
+    assert set(eligibility_prompts) == {ELIGIBILITY_PROMPT}
+    assert set(seen_system) == {SYSTEM_PROMPT}
+
+
 async def test_broken_review_keeps_answer_and_records_null(client, db, monkeypatch):
     """검토 LLM이 형식을 깨뜨리면 판정 없음(guardrail_passed=NULL) — 답은 그대로 나가고, 추측으로 pass/fail을 적지 않음.
     "검토 안 됨"은 과거답변 검색에도 넣지 않음(임베딩 조건이 guardrail_passed=TRUE)."""
