@@ -15,7 +15,7 @@ import logging
 
 import llm_client
 import mcp_client
-from system_prompt import ESCALATION_CONTACT_MESSAGE, SYSTEM_PROMPT
+from system_prompt import ESCALATION_CONTACT_MESSAGE, FOLLOW_UP_SEARCH_REMINDER, SYSTEM_PROMPT
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -220,7 +220,9 @@ async def run_agent_loop(question_text: str, history: list[dict], system_prompt:
     messages: list[dict] = (
         [{"role": "system", "content": system_prompt or SYSTEM_PROMPT}]
         + (history_used := _trim_history(history))
-        + [{"role": "user", "content": question_text}]
+        # 이전 대화가 있으면 질문 뒤에 재검색 알림을 붙임(2026-10-29 실측 B11 — system_prompt.FOLLOW_UP_SEARCH_REMINDER 참고).
+        # LLM에 보내는 메시지에만 붙고, main.py가 DB 저장·출력 검토에 쓰는 질문은 원래 question_text 그대로.
+        + [{"role": "user", "content": question_text + (FOLLOW_UP_SEARCH_REMINDER if history_used else "")}]
     )
 
     tool_call_count = 0

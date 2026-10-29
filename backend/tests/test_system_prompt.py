@@ -26,6 +26,15 @@ def test_eligibility_prompt_has_contact_and_safety_rules():
     assert "지어내지" in ELIGIBILITY_PROMPT
 
 
+def test_follow_up_reminder_has_greeting_exception():
+    """[2026-10-29 실측 B11 부작용] 재검색 알림을 "학과·입학 정보를 묻는 질문이면, …다시 검색"처럼 조건을 앞에 붙였더니,
+    이전 대화 뒤 "고마워요"에도 검색해서 앞 질문 답("정원은 30명…")을 또 말했음(2/2). 조건 하나 대신 예외를 따로 적어야 함(B6과 같은 교훈)."""
+    from system_prompt import FOLLOW_UP_SEARCH_REMINDER
+
+    assert "다시 검색해서 확인한 뒤 답할 것" in FOLLOW_UP_SEARCH_REMINDER
+    assert "감사·인사·잡담이면 검색하지 말고 짧게 답할 것" in FOLLOW_UP_SEARCH_REMINDER
+
+
 def test_ineffective_rule_15_1_is_removed_from_main_prompt():
     """[B9 1차 시도] 기본 프롬프트에 넣었던 15-1번은 실측에서 효과가 없었음(9/9 여전히 판정) — 개인 자격 질문은 이제
     전용 프롬프트로 가므로 기본 프롬프트에서 뺌(남기면 프롬프트만 길어짐)."""

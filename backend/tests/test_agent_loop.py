@@ -70,7 +70,32 @@ async def test_messages_ordered_system_history_question(fake_mcp, monkeypatch):
 
     first_call = seen_messages[0]
     assert [m["role"] for m in first_call] == ["system", "user", "assistant", "user"]
-    assert first_call[-1]["content"] == "이번 질문"
+    assert first_call[-1]["content"].startswith("이번 질문")  # 이전 대화가 있으면 뒤에 재검색 알림이 붙음(아래 테스트)
+
+
+async def test_follow_up_question_gets_search_reminder(fake_mcp, monkeypatch):
+    """[2026-10-29 실측 B11] 이전 대화가 있는 질문("그럼 수시 2차는요?")은 LLM에 보낼 때 뒤에 재검색 알림을 붙임.
+    실측: 알림 없이는 이어지는 질문 15번 중 1번만 검색하고 3번 지어냄("장학금 150만 원", "전형료 3만 원" — 문서엔 없는 금액),
+    알림을 붙이면 15/15 검색·지어냄 0. 첫 질문(이전 대화 없음)에는 안 붙임 — 원래 잘 검색하고, 인사에 검색을 부추기지 않게."""
+    from system_prompt import FOLLOW_UP_SEARCH_REMINDER
+
+    seen_last = []
+    original = agent_loop.generate_llm_response
+
+    async def spy(messages, tools, thinking):
+        seen_last.append(messages[-1]["content"] if messages[-1]["role"] == "user" else None)
+        return await original(messages, tools, thinking)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
+    history = [{"role": "user", "content": "입학 정원이 몇 명이에요?"}, {"role": "assistant", "content": "30명이에요."}]
+
+    await agent_loop.run_agent_loop("그럼 수시 2차는요?", history=history)
+    follow_up = seen_last[0]
+    seen_last.clear()
+    await agent_loop.run_agent_loop("입학 정원이 몇 명이에요?", history=[])
+
+    assert follow_up == "그럼 수시 2차는요?" + FOLLOW_UP_SEARCH_REMINDER
+    assert seen_last[0] == "입학 정원이 몇 명이에요?"
 
 
 async def test_custom_system_prompt_replaces_default(fake_mcp, monkeypatch):

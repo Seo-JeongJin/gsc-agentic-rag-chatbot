@@ -359,6 +359,27 @@ async def test_personal_eligibility_question_uses_dedicated_prompt(client, db, m
     assert set(seen_system) == {SYSTEM_PROMPT}
 
 
+async def test_follow_up_reminder_is_not_saved_or_reviewed(client, db, monkeypatch):
+    """[B11] 재검색 알림은 LLM에 보내는 메시지에만 붙어야 함 — DB(대시보드 질문 로그)와 출력 검토에는 사용자가 쓴 원래 질문이 들어가야
+    관리자가 보는 질문이 실제 질문과 같고, 검토 LLM이 알림 문구를 "사용자 질문"으로 오해하지 않음."""
+    import output_guardrail
+    from system_prompt import FOLLOW_UP_SEARCH_REMINDER
+
+    reviewed = []
+
+    async def fake_call(prompt):
+        reviewed.append(prompt)
+        return '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}'
+
+    monkeypatch.setattr(output_guardrail, "generate_review_llm_call", fake_call)
+
+    await _ask(client, "입학 정원 알려주세요", session_id="s-follow")
+    qid = (await _ask(client, "그럼 수시 2차는요?", session_id="s-follow"))["question_id"]
+
+    assert await db.fetchval("SELECT question_text FROM questions WHERE id=$1", qid) == "그럼 수시 2차는요?"
+    assert all(FOLLOW_UP_SEARCH_REMINDER.strip() not in p for p in reviewed)
+
+
 async def test_broken_review_keeps_answer_and_records_null(client, db, monkeypatch):
     """검토 LLM이 형식을 깨뜨리면 판정 없음(guardrail_passed=NULL) — 답은 그대로 나가고, 추측으로 pass/fail을 적지 않음.
     "검토 안 됨"은 과거답변 검색에도 넣지 않음(임베딩 조건이 guardrail_passed=TRUE)."""
