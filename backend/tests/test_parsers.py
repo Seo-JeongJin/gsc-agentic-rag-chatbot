@@ -131,3 +131,15 @@ def test_cluster_prompt_truncates_long_questions():
     prompt = _build_cluster_prompt([{"question_text": "가" * 1000}])
 
     assert "가" * (MAX_QUESTION_CHARS_IN_PROMPT + 1) not in prompt
+
+
+def test_cluster_prompt_lists_existing_categories():
+    """[2026-10-29 실측 B15 재현] 프롬프트에 기존 카테고리 목록이 없어서, LLM이 이미 있는 "입학전형 > 원서접수·전형료"를
+    "입학상담 > 전형료 문의"처럼 다른 이름으로 또 제안했음(누를 때마다 이름만 다른 제안이 쌓임). 기존 목록과 "이미 있는 주제는 제안하지 말 것"이 있어야 함."""
+    from db.batch_analysis import _build_cluster_prompt
+
+    prompt = _build_cluster_prompt([{"question_text": "전형료 5만원 맞죠?"}], [("입학전형", "원서접수·전형료"), ("기타", "기타")])
+
+    assert "입학전형 > 원서접수·전형료" in prompt
+    assert "이름이 달라도 같은 주제" in prompt
+    assert "기타 > 기타" not in prompt  # "기타"는 제안 비교 대상이 아님(기타에 해당하니 제안 안 함 → 항상 제안 없음이 되어버림)

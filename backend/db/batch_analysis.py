@@ -9,6 +9,8 @@ category_proposals에 "제안"만 쌓아두는 기능. 실제 categories에 반�
 1. 임계치(코드): 기타로 분류된 질문이 MIN_FOR_SUGGESTION건 미달이면 LLM 호출 자체를 안 함.
 2. 노이즈 필터링(LLM): 쓰레기/무관 질문뿐이면 LLM이 "제안 없음"으로 응답하도록 프롬프트에 명시.
 추가로 같은 이름이 이미 카테고리로 있거나, 대기 중이거나, 관리자가 거절한 적 있으면 저장하지 않음.
+(2026-10-29 학교 실측) 3. 기존 카테고리 목록을 프롬프트에 넣어서 "이름만 다른 같은 주제"를 LLM이 걸러내게 함(B15),
+4. 서로 다른 관련 질문이 MIN_DISTINCT_RELATED개 미만이면 코드가 제안을 버림(B16 — 같은 문장 반복을 "주제"로 보던 문제).
 
 승인하면 기타>기타 질문들을 새 카테고리 목록으로 다시 분류함(category_tagging.retag_etc_questions,
 admin_api.py가 백그라운드로 호출) — 원래 질문들이 계속 기타에 남아서 같은 제안이 반복되는 원인을 없앰.
@@ -20,6 +22,9 @@ import llm_client
 from db.connection import get_pool
 
 MIN_FOR_SUGGESTION = 5
+# (2026-10-29 실측 B16) 제안 하나에 필요한 "서로 다른" 관련 질문 수 — 같은 문장("전형료 5만원 맞죠?") 2개만으로
+# "반복되는 주제"라며 새 카테고리를 제안했음. 같은 문장은 하나로 셈. 3인 이유: 2개는 우연히 겹칠 수 있어서 "반복"이라 보기 어려움.
+MIN_DISTINCT_RELATED = 3
 SAMPLE_QUESTION_COUNT = 5  # 관리자 화면에 보여줄 샘플 질문 개수(관련 질문 중 앞에서부터)
 # 프롬프트에 넣는 질문 한 건의 최대 글자 수(2026-10-28 2차 리뷰 5번) — 50건 × 최대 1,000자를 그대로 넣으면
 # vLLM 길이 제한을 넘어 매번 502. 주제를 묶는 판단엔 질문 앞부분이면 충분함. (샘플 질문 저장은 원문 그대로)
@@ -43,14 +48,26 @@ async def fetch_unclassified_questions(category_id: int, limit: int = 50) -> lis
         return [dict(row) for row in rows]
 
 
-def _build_cluster_prompt(questions: list[dict]) -> str:
+def _build_cluster_prompt(questions: list[dict], categories: list[tuple[str, str]] = ()) -> str:
+    """기타 질문 목록 + 기존 카테고리 목록으로 클러스터 프롬프트를 만듦.
+
+    기존 카테고리 목록을 넣는 이유(2026-10-29 실측 B15): 전엔 목록이 없어서 LLM이 이미 있는 "입학전형 > 원서접수·전형료"를
+    "입학상담 > 전형료 문의"처럼 다른 이름으로 또 제안했고, 코드의 중복 검사는 이름이 글자까지 같을 때만 막아서 누를 때마다
+    이름만 다른 제안이 쌓였음. "기타 > 기타"는 목록에서 뺌 — 넣으면 "기타에 해당하니 제안 안 함"으로 항상 제안이 없어질 수 있음.
+    목록은 [질문 목록] 앞에 둠(가짜 LLM이 [질문 목록] 뒤를 질문으로 읽기 때문)."""
     def shorten(text: str) -> str:
         return text if len(text) <= MAX_QUESTION_CHARS_IN_PROMPT else text[:MAX_QUESTION_CHARS_IN_PROMPT] + "…"
 
     lines = "\n".join(f"{i}. {shorten(q['question_text'])}" for i, q in enumerate(questions, start=1))
+    category_lines = "\n".join(f"- {major} > {minor}" for major, minor in categories if major != "기타") or "(없음)"
     return f"""다음은 챗봇이 "기타"로 분류한(기존 카테고리 어디에도 맞지 않는) 질문들입니다.
 이 중에서 실제로 입학상담과 관련이 있고 반복되는 진짜 주제가 있는지 찾아주세요. 의미없는
 문자열, 테스트성 입력, 욕설, 완전히 무관한 질문(날씨 등)은 패턴을 찾는 근거로 쓰지 마세요.
+아래 [기존 카테고리] 중 하나에 해당하는 주제는 이름이 달라도 같은 주제이므로 제안하지 마세요
+(그 질문들은 분류가 잘못된 것일 뿐 새 카테고리가 필요한 게 아닙니다).
+
+[기존 카테고리]
+{category_lines}
 
 [질문 목록]
 {lines}
@@ -200,7 +217,9 @@ async def run_category_suggestion() -> dict:
         return {"status": "insufficient_data", "count": total, "required": MIN_FOR_SUGGESTION}
 
     questions = await fetch_unclassified_questions(category_id)
-    prompt = _build_cluster_prompt(questions)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT major, minor FROM categories ORDER BY major, minor")
+    prompt = _build_cluster_prompt(questions, [(r["major"], r["minor"]) for r in rows])
     raw_response = await generate_cluster_llm_call(prompt)
     parsed = _parse_cluster_response(raw_response, question_count=len(questions))
 
@@ -209,10 +228,15 @@ async def run_category_suggestion() -> dict:
 
     # LLM이 고른 번호(1부터 시작, 프롬프트 목록 순서)로 실제 관련 질문만 골라냄 — 건수와 샘플을 여기서 만듦
     related = [questions[n - 1]["question_text"] for n in parsed["question_numbers"]]
+    # 같은 문장은 하나로 셈(앞뒤 공백만 무시, 순서 유지) — 서로 다른 질문이 MIN_DISTINCT_RELATED개 미만이면 "반복되는 주제"가
+    # 아니라고 보고 버림(B16). 프론트(CategorySuggestions.jsx)가 아는 상태값을 그대로 쓰려고 no_pattern으로 돌려줌.
+    distinct = list(dict.fromkeys(text.strip() for text in related))
+    if len(distinct) < MIN_DISTINCT_RELATED:
+        return {"status": "no_pattern", "checked_count": total}
     result = await _save_proposal(
         parsed["major"], parsed["minor"], parsed["reason"],
         related_question_count=len(related),
-        sample_questions=related[:SAMPLE_QUESTION_COUNT],
+        sample_questions=distinct[:SAMPLE_QUESTION_COUNT],
     )
     if not result["saved"]:
         # 프론트(CategorySuggestions.jsx)의 상태별 안내 문구 키와 맞춤

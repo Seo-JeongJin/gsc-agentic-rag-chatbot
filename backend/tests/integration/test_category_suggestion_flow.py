@@ -148,3 +148,30 @@ async def test_approval_reclassifies_etc_questions(admin_client, db, monkeypatch
     by_text = {r["question_text"]: (r["major"], r["minor"]) for r in rows}
     assert by_text["오늘 날씨 어때요"] == ETC
     assert all(cat == ("학과소개", "포트폴리오 제출") for text, cat in by_text.items() if "포트폴리오" in text)
+
+
+async def test_same_question_repeated_is_not_a_topic(admin_client, db):
+    """[2026-10-29 실측 B16 재현] 같은 문장("전형료 5만원 맞죠?") 2개만 근거로 "반복되는 주제"라며 새 카테고리를 제안했음.
+    같은 문장은 하나로 세고, 서로 다른 질문이 MIN_DISTINCT_RELATED(3)개 미만이면 제안하지 않음(no_pattern) — 코드가 막는 규칙.
+    (가짜 LLM은 "포트폴리오"가 들어간 질문을 전부 관련 질문으로 고름)"""
+    for _ in range(5):
+        await insert_question(db, "포트폴리오 제출해야 하나요", category=ETC)
+    for text in ["오늘 날씨 어때요", "안녕하세요"]:
+        await insert_question(db, text, category=ETC)
+
+    result = (await admin_client.post("/admin/category-suggestions/analyze")).json()
+
+    assert result["status"] == "no_pattern"
+    assert (await admin_client.get("/admin/category-suggestions")).json() == []
+
+
+async def test_samples_do_not_repeat_the_same_question(admin_client, db):
+    """서로 다른 질문이 3개 이상이면 제안은 되지만, 관리자에게 보여줄 샘플에는 같은 문장이 한 번만 나와야 함."""
+    for text in ["포트폴리오 제출해야 하나요", "포트폴리오 제출해야 하나요", "포트폴리오 양식 있나요", "포트폴리오 분량은요"]:
+        await insert_question(db, text, category=ETC)
+    await insert_question(db, "오늘 날씨 어때요", category=ETC)
+
+    proposal = (await admin_client.post("/admin/category-suggestions/analyze")).json()["proposal"]
+
+    samples = proposal["sample_questions"]["questions"]
+    assert sorted(samples) == sorted(set(samples)) and len(samples) == 3
