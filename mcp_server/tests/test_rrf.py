@@ -41,3 +41,11 @@ def test_other_row_fields_are_preserved():
 def test_empty_lists_return_empty():
     """검색 결과가 하나도 없을 때 에러 없이 빈 리스트를 돌려줘야 함(무관한 질문 등)."""
     assert merge_rrf([], []) == []
+
+
+def test_search_returns_six_results():
+    """[2026-11-04 실측 B20] 긴 절을 250자 조각으로 나눈 뒤엔 결과 6개도 검색 1번 예산(2500자) 안에 들어감(평균 5.9개).
+    5개로는 "면접에 못 가면?"의 면접 결시 조각(6위)·"입도선매전형"의 50% 조각(6위)이 빠졌음 → 6개면 정답 전달 26/26."""
+    from search_documents import TOP_K
+
+    assert TOP_K == 6

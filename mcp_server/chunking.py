@@ -18,6 +18,14 @@
 import re
 
 MAX_SECTION_LENGTH = 1200  # 제목 단위로 나눈 섹션이 이보다 길면 추가로 쪼갬(표는 쪼개지 않음)
+# (2026-11-04 학교 실측 B20) 일반 절(FAQ Q&A 제외)의 조각이 이 길이를 넘으면 줄 단위로 PIECE_MAX_LENGTH 이하 조각으로 다시 나눔.
+# 왜: 4.5 입도선매전형 절(1,310자 — 자격 유형 4개·제한·면접 비중이 한 덩어리)이 여러 주제가 섞여 임베딩이 흐려져서
+#     "검정고시 출신인데 돼요?"에 13위, 4.9 면접 절은 "면접에 못 가면?"에 19위로 밀렸고, 들어와도 검색 결과 한 건당 700자에서 잘려
+#     "3등급(1.0–3.9)"·"검정고시 제한"(810·1,080번째 글자)을 LLM이 본 적이 없었음. 이 절들은 "- 항목" 줄이 빈 줄 없이 이어져서
+#     위의 문단 단위 쪼개기로는 안 나뉨. 실측: 250자 조각 + 검색 결과 6개(search_documents.TOP_K)로 정답 전달 23/26 → 26/26
+#     (400자 조각은 23/26 그대로). 500자 이하 절은 원래대로 둠 — 짧은 절까지 쪼개면 맥락만 끊김.
+SPLIT_LINES_OVER = 500
+PIECE_MAX_LENGTH = 250
 
 HEADING_PATTERN = re.compile(r"^(#{2,3})\s+(.+)$", re.MULTILINE)
 TITLE_PATTERN = re.compile(r"^#\s+(.+)$", re.MULTILINE)  # 문서 맨 위의 "# 문서제목" (## 아님)
@@ -106,8 +114,48 @@ def _split_long_section(heading_path: str, body: str) -> list[str]:
     return chunks
 
 
+def _split_into_line_pieces(chunk: str) -> list[str]:
+    """"[제목]\\n본문" 청크가 SPLIT_LINES_OVER자를 넘으면 줄 단위로 PIECE_MAX_LENGTH자 이하 조각으로 나누고, 조각마다 같은 제목을 붙임(B20).
+
+    - 표(|로 시작하는 연속된 줄)는 길어도 한 조각으로 통째로 — 표 행이 갈라지면 의미가 깨짐(원칙 3).
+    - 한 줄이 PIECE_MAX_LENGTH보다 길면 그 줄은 자르지 않고 한 조각으로 둠 — 문장 중간에서 자르지 않는 원칙(원칙 1).
+    - 줄 순서와 내용은 그대로(조각을 이어 붙이면 원래 본문)."""
+    head, _, body = chunk.partition("\n")
+    if len(chunk) <= SPLIT_LINES_OVER:
+        return [chunk]
+
+    # 표 줄 묶음과 일반 줄 묶음을 나눔 — 표는 통째로, 일반 줄만 길이에 맞춰 나눔
+    blocks: list[list[str]] = []
+    for line in body.split("\n"):
+        if blocks and line.startswith("|") == blocks[-1][-1].startswith("|"):
+            blocks[-1].append(line)
+        else:
+            blocks.append([line])
+
+    pieces, buffer = [], ""
+    for block in blocks:
+        if block[0].startswith("|"):
+            if buffer.strip():
+                pieces.append(buffer.strip())
+                buffer = ""
+            pieces.append("\n".join(block).strip())
+            continue
+        for line in block:
+            if buffer and len(buffer) + len(line) > PIECE_MAX_LENGTH:
+                pieces.append(buffer.strip())
+                buffer = line
+            else:
+                buffer = f"{buffer}\n{line}" if buffer else line
+    if buffer.strip():
+        pieces.append(buffer.strip())
+
+    return [f"{head}\n{piece}" for piece in pieces if piece.strip()]
+
+
 def split_markdown_into_chunks(markdown_text: str) -> list[str]:
-    """마크다운 문서 전체를 받아서, 검색용 청크 리스트로 변환 (유의사항 섹션은 제외됨)."""
+    """마크다운 문서 전체를 받아서, 검색용 청크 리스트로 변환 (유의사항 섹션은 제외됨).
+    일반 절은 문단 단위로 나눈 뒤, 그래도 긴 조각은 줄 단위로 한 번 더 나눔(2026-11-04 B20 — _split_into_line_pieces 참고).
+    FAQ Q&A는 질문 하나 = 조각 하나가 이미 완결된 검색 단위라 더 나누지 않음."""
     sections = _split_by_headings(markdown_text)
     chunks = []
 
@@ -117,7 +165,8 @@ def split_markdown_into_chunks(markdown_text: str) -> list[str]:
         if "**Q." in body:
             chunks.extend(_split_qa_section(heading_path, body))
         else:
-            chunks.extend(_split_long_section(heading_path, body))
+            for chunk in _split_long_section(heading_path, body):
+                chunks.extend(_split_into_line_pieces(chunk))
 
     return chunks
 

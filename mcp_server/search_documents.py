@@ -11,7 +11,10 @@ from embedding import embed
 from rrf import merge_rrf
 
 CANDIDATE_LIMIT = 20   # 벡터/키워드 검색 각각에서 몇 개씩 후보로 가져올지 (병합 전 단계)
-TOP_K = 5              # RRF 병합 후 최종적으로 몇 개를 돌려줄지
+TOP_K = 6              # RRF 병합 후 최종적으로 몇 개를 돌려줄지
+# (2026-11-04 학교 실측 B20) 5 → 6: 긴 절을 250자 조각으로 나눈 뒤(chunking.py) 조각이 짧아져서 6개도 검색 1번 예산(2500자) 안에 들어감
+# (평균 5.9개). 5개로는 "면접에 못 가면?"의 면접 결시 조각·"입도선매전형"의 50% 조각(둘 다 6위)이 빠졌음 → 6개면 정답 전달 26/26.
+# 참고: 같은 실측에서 키워드 검색(아래 plainto_tsquery)은 자연어 질문 50/50에서 0건 — 사실상 벡터 검색만 동작(실측_버그기록.md B18).
 
 
 async def search_documents(query: str, top_k: int = TOP_K) -> list[dict]:
