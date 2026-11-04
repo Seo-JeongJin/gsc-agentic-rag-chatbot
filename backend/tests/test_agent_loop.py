@@ -331,6 +331,30 @@ async def test_second_search_is_not_starved_by_the_first(monkeypatch):
     assert all(len(c) <= agent_loop.MAX_TOOL_RESULT_CHARS_PER_CALL for c in tool_contents)
 
 
+async def test_one_search_carries_four_full_items(monkeypatch):
+    """[2026-11-04 실측 B19 재현] "입도선매전형이 뭐예요?"의 "학비 50% 감면" 문단이 검색 결과 4위였는데, 검색 1번 1500자 예산으로는
+    3개까지만 LLM에 가서 답에서 "50%"가 계속 빠졌음(A3). 2500자면 보통 길이 문단 4개(JSON 포함)가 다 들어가야 함.
+    (실측: 1500 → 2500자로 정답 전달 20/24 → 21/24. 3000은 나아진 게 없고 편입 뒤바꿈 답이 늘어서 채택 안 함)
+    문단 길이를 540자로 잡은 이유: 4개 = JSON 포함 약 2,440자로 1500엔 안 들어가고 2500엔 들어감. 700자 꽉 찬 문단 4개는
+    약 3,040자라 2500에도 안 들어감 — 실제 문단은 대부분 그보다 짧아서(90%가 705자 이하) 실측에선 4개가 들어갔음."""
+    results = [{"id": i, "chunk_text": f"{i}번문단" + "가" * 530, "source": "faq.md", "similarity": 0.6} for i in range(5)]
+
+    async def call_tool(name, arguments):
+        return results
+
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools", lambda: [])
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", call_tool)
+    seen = _scripted_llm(monkeypatch, [
+        _tool_call_response("search_documents", json.dumps({"query": "q"})),
+        {"role": "assistant", "content": "답변", "tool_calls": None},
+    ])
+
+    await agent_loop.run_agent_loop("질문", history=[])
+
+    tool_content = next(m["content"] for m in seen[-1] if m["role"] == "tool")
+    assert all(f"{i}번문단" in tool_content for i in range(4))
+
+
 async def test_long_latest_turn_is_truncated_not_dropped(fake_mcp, monkeypatch):
     """[3차 5번 버그 재현] 가장 최근 질문/답변 한 쌍이 혼자 상한을 넘으면, 수정 전엔 이전 대화가 통째로 사라져서
     긴 답변 바로 다음의 "그럼 그건요?" 같은 질문이 맥락을 잃었음. 최근 한 쌍은 잘라서라도 남겨야 함."""
@@ -349,19 +373,6 @@ async def test_long_latest_turn_is_truncated_not_dropped(fake_mcp, monkeypatch):
 
 
 # ----- 2026-10-29 실측 B14: 답에 중국어가 섞이면 한 번 다시 쓰게 함 -----
-
-
-def _scripted_llm(monkeypatch, replies):
-    """LLM 응답을 순서대로 돌려주는 가짜 + 받은 messages 기록 — "첫 답에 중국어 → 다시 쓰기 요청" 흐름을 재현하기 위함."""
-    seen = []
-    it = iter(replies)
-
-    async def scripted(messages, tools, thinking):
-        seen.append([dict(m) for m in messages])
-        return next(it)
-
-    monkeypatch.setattr(agent_loop, "generate_llm_response", scripted)
-    return seen
 
 
 async def test_chinese_in_answer_is_rewritten_once(fake_mcp, monkeypatch):
