@@ -34,8 +34,9 @@ services:
     environment:
       # db 서비스는 같은 Docker 네트워크 안이라 "db"라는 이름으로 서로 찾을 수 있음(localhost 아님)
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      # 임베딩 계산 위치 — local(기본값, 집: 이 컨테이너 CPU) / vllm(학교: GPU 서버). 자세한 설명은 .env.example
-      EMBEDDING_MODE: ${EMBEDDING_MODE:-local}
+      # 임베딩 계산 위치 — local(집: 이 컨테이너 CPU) / vllm(학교·운영: GPU 서버). 자세한 설명은 .env.example
+      # 기본값 없음(2026-11-09): .env에 빠뜨리면 조용히 local로 켜지지 않고 compose가 오류로 멈춤 — 배포 서버 설정 실수를 바로 알아채게
+      EMBEDDING_MODE: ${EMBEDDING_MODE:?.env에 EMBEDDING_MODE(local 또는 vllm)가 필요합니다}
       EMBEDDING_URL: ${EMBEDDING_URL:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
     ports:
@@ -72,8 +73,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       MCP_SERVER_URL: http://mcp_server:9000/mcp
-      # 생성 LLM — mock(기본값, 집: 가짜 응답) / vllm(학교: GPU 서버). 자세한 설명은 .env.example
-      LLM_MODE: ${LLM_MODE:-mock}
+      # 생성 LLM — mock(집: 가짜 응답) / vllm(학교·운영: GPU 서버). 자세한 설명은 .env.example
+      # 기본값 없음(2026-11-09): 예전엔 빠뜨리면 mock으로 켜져서 지원자에게 "(가짜 답변) …"이 나갈 수 있었음 → 이제 compose가 오류로 멈춤
+      LLM_MODE: ${LLM_MODE:?.env에 LLM_MODE(mock 또는 vllm)가 필요합니다}
       VLLM_URL: ${VLLM_URL:-}
       VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3-14B-AWQ}
     ports:

@@ -5,6 +5,7 @@ FastAPI 진입점 — HTTP 요청을 받아 가드레일→세션처리→메모
 """
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,8 +39,18 @@ logger = logging.getLogger("uvicorn.error")
 LONG_TERM_MEMORY_ENABLED = False
 
 
+def warn_if_mock_mode() -> None:
+    """서버 시작 시 LLM_MODE가 mock(값이 없을 때 포함)이면 경고 로그를 남김 (2026-11-09 배포 전 점검).
+    mock이면 지원자에게 "(가짜 답변) …"이 나가는데 서버는 오류 없이 정상으로 켜져서 모르고 지나칠 수 있음.
+    docker-compose.yml이 LLM_MODE 없이는 안 켜지게 막는 게 첫 번째 안전장치, 이건 mock을 직접 적은 경우까지 로그로 보이게 하는 두 번째.
+    서버를 멈추지 않는 이유: 집 개발·테스트에선 mock이 정상 모드라서. 판정 규칙은 llm_client._mode()와 같음(값이 없으면 mock)."""
+    if os.environ.get("LLM_MODE", "mock").strip().lower() == "mock":
+        logger.warning("⚠️ LLM_MODE=mock — 가짜 답변 모드로 실행 중. 배포 서버라면 .env에 LLM_MODE=vllm으로 바꿀 것")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    warn_if_mock_mode()
     # 0번 단계: 앱 시작 시 MCP 서버에 연결하고 도구 목록을 캐싱
     await mcp_client.connect_and_cache_tools()
     yield
