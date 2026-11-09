@@ -81,6 +81,15 @@ def test_review_prompt_asks_info_question_separately():
     assert "애초에 정보를 묻는 질문이 아니었으면 true로 표시하세요" not in prompt  # 효과 없던 조건부 문구는 제거
 
 
+def test_review_prompt_counts_facilities_and_academic_rules_as_info_questions():
+    """[2026-11-09 실측 B12 재현] "학교 셔틀버스 있어요?"·"휴학은 몇 번까지?"에 "자료에 명시되어 있지 않다"고 답했는데,
+    검토 LLM이 이 질문들을 정보 질문이 아니라고(info_question=False) 봐서 "답변 못한 질문"에 안 잡혔음(모른다 답 46개 중 3개).
+    정보 질문 범위에 시설·교통·학사 제도를 예시로 넣으면 놓친 답 10/12 → 12/12, 정상·인사·거절은 그대로 16/16."""
+    prompt = _build_review_prompt("학교 셔틀버스 있어요?", "셔틀버스 정보는 자료에 명시되어 있지 않아요.", "")
+    assert "학교 시설·교통" in prompt
+    assert "휴학·복수전공 같은 학사 제도" in prompt
+
+
 # ----- LLM 검토: 응답 파싱 -----
 
 
