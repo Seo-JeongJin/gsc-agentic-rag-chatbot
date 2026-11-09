@@ -6,6 +6,8 @@
  * <style> 태그로 직접 주입함.
  */
 
+import { formatAnswer } from "./format.js";
+
 const STYLES = `
   :host{all:initial;}
   *{box-sizing:border-box;}
@@ -35,7 +37,8 @@ const STYLES = `
   .fab.open .icon-chat{display:none;}
   .fab.open .icon-close{display:block;}
 
-  .panel{position:fixed;right:20px;bottom:90px;width:380px;max-width:calc(100vw - 32px);height:min(600px,calc(100vh - 140px));background:var(--bg-panel);border-radius:24px;box-shadow:0 24px 50px rgba(29,95,214,.18),0 2px 6px rgba(11,22,38,.08);display:flex;flex-direction:column;overflow:hidden;z-index:2147483000;opacity:0;transform:translateY(24px) scale(.9);pointer-events:none;transition:opacity .28s ease,transform .4s var(--ease-bounce);}
+  /* 폭 380→420px (2026-11-09 시안 B — 좁은 말풍선에서 글이 덩어리로 보였음). 휴대폰은 아래 @media에서 화면 폭에 맞춤 */
+  .panel{position:fixed;right:20px;bottom:90px;width:420px;max-width:calc(100vw - 32px);height:min(600px,calc(100vh - 140px));background:var(--bg-panel);border-radius:24px;box-shadow:0 24px 50px rgba(29,95,214,.18),0 2px 6px rgba(11,22,38,.08);display:flex;flex-direction:column;overflow:hidden;z-index:2147483000;opacity:0;transform:translateY(24px) scale(.9);pointer-events:none;transition:opacity .28s ease,transform .4s var(--ease-bounce);}
   .panel.open{opacity:1;transform:translateY(0) scale(1);pointer-events:auto;}
 
   .panel-header{background:linear-gradient(135deg,var(--primary),#1646a8);color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;}
@@ -57,7 +60,13 @@ const STYLES = `
   .msg-avatar{width:26px;height:26px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;overflow:hidden;}
   .msg-avatar svg{width:14px;height:14px;}
   .msg-avatar img{width:100%;height:100%;object-fit:cover;}
-  .bubble{padding:10px 14px;border-radius:18px;font-size:13.5px;line-height:1.55;animation:pop-in .32s var(--ease-bounce);white-space:pre-wrap;}
+  /* 2026-11-09 사용자 승인 시안 B: 글자 13.5→14px·줄 간격 1.55→1.65, keep-all = 한국어 단어 중간에서 줄이 안 끊기게
+     ("AI 기/술을"처럼 끊겨 글이 붙어 보였음), overflow-wrap:anywhere = 긴 URL처럼 공백 없는 글자는 그래도 넘치지 않게 */
+  .bubble{padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.65;animation:pop-in .32s var(--ease-bounce);white-space:pre-wrap;word-break:keep-all;overflow-wrap:anywhere;}
+  .bubble strong{font-weight:700;}
+  /* 챗봇 답은 format.js가 빈 줄 기준으로 <p> 문단으로 나눔 — 문단 사이만 간격을 줘서 어디서 끊기는지 보이게 */
+  .bubble p{margin:0;}
+  .bubble p + p{margin-top:12px;}
   @keyframes pop-in{from{opacity:0;transform:scale(.8) translateY(6px);}to{opacity:1;transform:scale(1) translateY(0);}}
   .msg-row.bot .bubble{background:var(--bg-bot-bubble);color:var(--text);border-top-left-radius:4px;}
   .msg-row.user .bubble{background:var(--primary);color:#fff;border-top-right-radius:4px;}
@@ -192,7 +201,8 @@ export function mountWidget(shadowRoot, callbacks) {
           </div>
         </div>` : ""}
       </div>`;
-    row.querySelector(".bubble").textContent = text;
+    // 챗봇 답은 format.js가 escape(XSS 방어) 후 굵게·문장 줄바꿈·문단을 입혀서 넣음 — 사용자 메시지는 그대로 textContent
+    row.querySelector(".bubble").innerHTML = formatAnswer(text);
 
     if (questionId != null) {
       // 썸업/썸다운 두 버튼 중 하나만 선택 가능하게(라디오버튼처럼) — 누를 때마다
