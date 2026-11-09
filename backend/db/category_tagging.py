@@ -137,6 +137,24 @@ async def tag_question(question_id: int, question_text: str, answer_text: str) -
         print(f"[category_tagging] question_id={question_id} 분류 실패: {e}")
 
 
+async def tag_as_etc(question_id: int) -> None:
+    """LLM 없이 기타>기타로 바로 저장 (2026-11-09 B22·D14) — 잡담(CHAT)·내부 정보(META)·범위 밖(OOS) 메시지용.
+    입구의 의도 분류가 이미 "입학 정보를 묻는 질문이 아님"을 판단했으므로, 분류 LLM을 한 번 더 부를 이유가 없음.
+    ("판단 자체가 없었던" 호출 실패와 달리, 여기는 의도 분류라는 판단이 있었으므로 NULL이 아니라 기타가 맞음 — 모듈 설명 참고)
+    tag_question과 같은 규칙: 실패해도 예외를 밖으로 던지지 않음(category_id가 NULL로 남을 뿐)."""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            category_id = await conn.fetchval(
+                "SELECT id FROM categories WHERE major=$1 AND minor=$2", FALLBACK_MAJOR, FALLBACK_MINOR
+            )
+            await conn.execute(
+                "UPDATE questions SET category_id=$1 WHERE id=$2", category_id, question_id
+            )
+    except Exception as e:  # noqa: BLE001 — 백그라운드 태스크 실패가 메인 요청에 전파되면 안 됨
+        print(f"[category_tagging] question_id={question_id} 기타 저장 실패: {e}")
+
+
 async def retag_etc_questions() -> int:
     """기타>기타로 분류돼 있는 질문 전부를 지금의 카테고리 목록으로 다시 분류. 다시 분류한 질문 수를 반환.
 

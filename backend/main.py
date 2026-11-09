@@ -19,14 +19,14 @@ import agent_loop
 import guardrail
 import mcp_client
 from admin_api import router as admin_router
-from db.category_tagging import tag_question
+from db.category_tagging import tag_as_etc, tag_question
 from db.log_service import save_log, save_question_embedding, set_rating, update_review_result
 from db.memory_service import fetch_recent_history
 from db.session_service import process_session, reset_conversation
 from llm_client import LLMError
 from output_guardrail import build_grounded_context, find_unsupported_numbers, review_answer
-from question_router import is_personal_eligibility
-from system_prompt import ELIGIBILITY_PROMPT
+from question_router import CHAT, ELIG, META, OOS, classify_intent
+from system_prompt import CHAT_PROMPT, ELIGIBILITY_PROMPT, META_RESPONSE, OOS_RESPONSE
 
 # uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
 logger = logging.getLogger("uvicorn.error")
@@ -176,20 +176,42 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # 4번: 숏텀 메모리 조회 (루프 시작 전 1회만)
     history = await fetch_recent_history(payload.session_id)
 
-    # 4-2번: 질문 분류 (2026-10-29 학교 실측 B9) — 개인 자격 판정 질문("내신 4.2·5.8등급인데 입도선매 되나요?")이면
-    # 전용 프롬프트로 답함. 기본 프롬프트로는 모델이 직접 계산해서 틀린 판정을 냈음(question_router.py 설명 참고).
-    # 분류가 실패하면 False → 지금까지와 같은 기본 경로.
-    eligibility = await is_personal_eligibility(payload.question_text)
-    if eligibility:
-        logger.info("질문 분류: 개인 자격 판정 질문 → 전용 프롬프트 | 질문: %s", payload.question_text)
+    # 4-2번: 질문 의도 분류 (2026-11-09 학교 실측 B22, 설계 결정 D14 — 2026-10-29 B9의 개인 자격 분류를 5종류로 넓힘).
+    # 판단(어떤 종류인가)은 LLM, 경로 선택은 여기 코드가 함. 분류가 실패하면 INFO → 지금까지와 같은 기본 경로(question_router.py 설명).
+    #   INFO: 기본 프롬프트 + 검색 / ELIG: 개인 자격 전용 프롬프트 + 검색 / CHAT: 대화 전용 프롬프트, 검색 없음
+    #   META·OOS: LLM 없이 고정 문구 — 모델이 내부 정보를 지어내거나 상관없는 질문에 상식으로 답할 여지를 없앰
+    intent = await classify_intent(payload.question_text, history)
+    logger.info("질문 분류: %s | 질문: %s", intent, payload.question_text)
+
+    if intent in (META, OOS):
+        # 고정 문구라 검토할 "LLM 답"이 없음 → 출력 검토 안 함(guardrail_passed=NULL), 카테고리는 코드가 기타>기타.
+        # needs_review=FALSE라 숏텀 메모리엔 남음(다음 메시지에서 "방금 뭐라고 했어?"에 답할 수 있게), 과거답변 검색엔 안 들어감(임베딩 안 만듦).
+        answer_text = META_RESPONSE if intent == META else OOS_RESPONSE
+        question_id = await save_log(
+            session_id=payload.session_id,
+            question_text=payload.question_text,
+            answer_text=answer_text,
+            tool_call_count=0,
+            guardrail_passed=None,
+            needs_review=False,
+            review_reason=None,
+        )
+        background_tasks.add_task(tag_as_etc, question_id)
+        return AskResponse(answer_text=answer_text, question_id=question_id)
 
     # 5~12번: Agent 루프 (LLM_MODE=mock이면 가짜 LLM, vllm이면 실제 vLLM — llm_client.py)
     # LLM 서버가 재시도까지 다 실패하면 503 — 답변 자체가 없으니 로그도 안 남김(위젯은 "잠시 후 다시 시도" 표시).
     # 500이 아니라 503인 이유: 우리 코드 버그가 아니라 "GPU 서버가 일시적으로 응답 없음"이라는 뜻을 정확히 전달.
+    # CHAT은 도구 없이(검색 불가) + 재검색 알림 없이 — "잘 모르는거야?"에 검색해서 앞 주제를 반복하던 B22의 원인을 코드로 막음.
     try:
-        result = await agent_loop.run_agent_loop(
-            payload.question_text, history, system_prompt=ELIGIBILITY_PROMPT if eligibility else None
-        )
+        if intent == CHAT:
+            result = await agent_loop.run_agent_loop(
+                payload.question_text, history, system_prompt=CHAT_PROMPT, use_tools=False, follow_up_reminder=False
+            )
+        else:
+            result = await agent_loop.run_agent_loop(
+                payload.question_text, history, system_prompt=ELIGIBILITY_PROMPT if intent == ELIG else None
+            )
     except LLMError as e:
         logger.error("LLM 서버 호출 실패 — 503 응답: %s", e)
         raise HTTPException(status_code=503, detail="답변 서버가 잠시 응답하지 않습니다. 잠시 후 다시 시도해 주세요.") from e
@@ -208,6 +230,12 @@ async def ask(payload: AskRequest, background_tasks: BackgroundTasks) -> AskResp
         needs_review=needs_review,
         review_reason=review_reason,
     )
+
+    # 잡담(CHAT)은 카테고리 LLM 분류도, 출력 검토도 건너뜀 — 의도 분류가 이미 "정보 질문 아님"을 판단했고, 검색 근거가 없는 대화라
+    # 검토할 사실도 없음(검토하면 guardrail_passed 기록만 흐려짐). 검토를 안 하니 임베딩도 안 만들어져 과거답변 검색엔 안 들어감.
+    if intent == CHAT:
+        background_tasks.add_task(tag_as_etc, question_id)
+        return AskResponse(answer_text=answer_text, question_id=question_id)
 
     # 15번: 카테고리 태깅 백그라운드 호출 — 분류 LLM 호출이 끝나길 기다리지 않고 바로 16번(응답)으로 넘어감.
     background_tasks.add_task(tag_question, question_id, payload.question_text, answer_text)

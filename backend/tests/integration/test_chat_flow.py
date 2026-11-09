@@ -330,9 +330,9 @@ async def test_greeting_or_refusal_is_not_flagged_even_if_not_answered(client, d
 
 
 async def test_personal_eligibility_question_uses_dedicated_prompt(client, db, monkeypatch):
-    """[2026-10-29 실측 B9] 개인 자격 질문("내신 4.2·5.8등급인데 입도선매 되나요?")은 분류 LLM이 YES → 전용 프롬프트로 답변.
+    """[2026-10-29 실측 B9] 개인 자격 질문("내신 4.2·5.8등급인데 입도선매 되나요?")은 분류 LLM이 ELIG → 전용 프롬프트로 답변.
     기본 프롬프트로는 모델이 직접 계산해서 "충족하지 못합니다"라고 틀린 판정을 냈음(실제론 평균 5.0으로 자격 됨).
-    일반 질문(분류 NO)은 지금까지처럼 기본 프롬프트."""
+    일반 질문(분류 INFO)은 지금까지처럼 기본 프롬프트. (2026-11-09 D14: YES/NO 분류 → 5종류 의도 분류로 바뀜)"""
     import agent_loop
     import question_router
     from system_prompt import ELIGIBILITY_PROMPT, SYSTEM_PROMPT
@@ -345,7 +345,7 @@ async def test_personal_eligibility_question_uses_dedicated_prompt(client, db, m
         return await original(messages, tools, thinking)
 
     async def router(prompt):
-        return "YES" if "4.2등급" in prompt else "NO"
+        return "ELIG" if "4.2등급" in prompt else "INFO"
 
     monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
     monkeypatch.setattr(question_router, "generate_router_llm_call", router)
@@ -357,6 +357,122 @@ async def test_personal_eligibility_question_uses_dedicated_prompt(client, db, m
 
     assert set(eligibility_prompts) == {ELIGIBILITY_PROMPT}
     assert set(seen_system) == {SYSTEM_PROMPT}
+
+
+# ----- 2026-11-09 B22·D14: 질문 의도 5종류로 경로 나누기 -----
+
+
+def _route_as(monkeypatch, label: str) -> None:
+    """분류 LLM이 항상 label을 돌려주게 — "이 의도로 분류되면 main.py가 어느 경로로 보내나"만 보기 위함."""
+    import question_router
+
+    async def router(prompt):
+        return label
+
+    monkeypatch.setattr(question_router, "generate_router_llm_call", router)
+
+
+def _spy_llm_and_tools(monkeypatch):
+    """Agent 루프 LLM 호출(받은 system 프롬프트·도구 목록)과 MCP 도구 호출, 검토 LLM 호출을 기록하는 가짜를 끼움."""
+    import agent_loop
+    import output_guardrail
+
+    seen = {"system": [], "tools": [], "tool_calls": 0, "reviews": 0}
+    original = agent_loop.generate_llm_response
+
+    async def spy(messages, tools, thinking):
+        seen["system"].append(messages[0]["content"])
+        seen["tools"].append(tools)
+        return await original(messages, tools, thinking)
+
+    async def call_tool(name, arguments):
+        seen["tool_calls"] += 1
+        return []
+
+    async def review(prompt):
+        seen["reviews"] += 1
+        return '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}'
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
+    monkeypatch.setattr(agent_loop.mcp_client, "call_tool", call_tool)
+    monkeypatch.setattr(output_guardrail, "generate_review_llm_call", review)
+    return seen
+
+
+async def _category_of(db, question_id: int) -> str:
+    return await db.fetchval(
+        "SELECT c.major || '>' || c.minor FROM questions q JOIN categories c ON c.id = q.category_id WHERE q.id = $1", question_id)
+
+
+async def test_chat_message_after_an_answer_does_not_search_again(client, db, monkeypatch):
+    """[2026-11-09 실측 B22 재현] "글로벌시스템융합과란?" 다음 "잘 모르는거야?"에 매번 검색(도구 1회)하고 학과 설명을 그대로 반복했음 —
+    재검색 알림(B11)의 예외가 감사·인사·잡담뿐이라 되묻기·불만에도 "다시 검색"이 붙었기 때문.
+    이제 분류가 CHAT이면: 대화 전용 프롬프트, **도구 목록 없음**(검색 불가), 재검색 알림 없음, 출력 검토 생략, 카테고리는 코드가 기타>기타."""
+    from system_prompt import CHAT_PROMPT, FOLLOW_UP_SEARCH_REMINDER
+
+    await _ask(client, "글로벌시스템융합과란?", session_id="s-chat")   # 기본(mock) 분류 = INFO
+    seen = _spy_llm_and_tools(monkeypatch)
+    _route_as(monkeypatch, "CHAT")
+    captured = []
+    import agent_loop
+    spy = agent_loop.generate_llm_response
+
+    async def capture(messages, tools, thinking):
+        captured.append(messages[-1]["content"])
+        return await spy(messages, tools, thinking)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", capture)
+
+    qid = (await _ask(client, "잘 모르는거야?", session_id="s-chat"))["question_id"]
+
+    assert seen["system"] == [CHAT_PROMPT]
+    assert seen["tools"] == [None]
+    assert seen["tool_calls"] == 0 and seen["reviews"] == 0
+    assert FOLLOW_UP_SEARCH_REMINDER.strip() not in captured[0]
+    assert await _category_of(db, qid) == "기타>기타"
+
+
+async def test_meta_question_gets_fixed_reply_without_llm(client, db, monkeypatch):
+    """[B22 재현] "너 숏텀 메모리 적용돼있어?"에 모델이 "아니요, 메모리 기능을 사용하지 않아요"라고 지어냈음(실제론 적용됨) — 내부 정보는
+    "안내 불가"로만 답하라는 프롬프트 6번을 안 따름. 이제 META로 분류되면 LLM을 부르지 않고 코드가 고정 문구로 답함(지어낼 여지가 없음)."""
+    from system_prompt import META_RESPONSE
+
+    seen = _spy_llm_and_tools(monkeypatch)
+    _route_as(monkeypatch, "META")
+
+    data = await _ask(client, "너 숏텀 메모리 적용돼있어?", session_id="s-meta")
+
+    assert data["answer_text"] == META_RESPONSE
+    assert seen["system"] == [] and seen["tool_calls"] == 0 and seen["reviews"] == 0
+    row = await db.fetchrow("SELECT answer_text, needs_review, guardrail_passed FROM questions WHERE id=$1", data["question_id"])
+    assert (row["answer_text"], row["needs_review"], row["guardrail_passed"]) == (META_RESPONSE, False, None)
+    assert await _category_of(db, data["question_id"]) == "기타>기타"
+
+
+async def test_out_of_scope_question_gets_fixed_reply_without_llm(client, db, monkeypatch):
+    """범위 밖(날씨·맛집·욕설)은 OOS — 고정 안내 문구, LLM·검색·검토 없음, 카테고리 기타>기타."""
+    from system_prompt import OOS_RESPONSE
+
+    seen = _spy_llm_and_tools(monkeypatch)
+    _route_as(monkeypatch, "OOS")
+
+    data = await _ask(client, "오늘 날씨 어때?", session_id="s-oos")
+
+    assert data["answer_text"] == OOS_RESPONSE
+    assert seen["system"] == [] and seen["tool_calls"] == 0 and seen["reviews"] == 0
+    assert await _category_of(db, data["question_id"]) == "기타>기타"
+
+
+async def test_unknown_intent_goes_to_info_path(client, db, monkeypatch):
+    """분류 응답이 이상하면 INFO(검색하는 기존 경로) — 정보 질문을 잡담·거절로 잘못 보내 답을 못 받는 게 가장 나쁜 결과라서."""
+    from system_prompt import SYSTEM_PROMPT
+
+    seen = _spy_llm_and_tools(monkeypatch)
+    _route_as(monkeypatch, "알 수 없음")
+
+    await _ask(client, "입학 정원이 몇 명이에요?", session_id="s-unknown")
+
+    assert seen["system"][0] == SYSTEM_PROMPT
 
 
 async def test_follow_up_reminder_is_not_saved_or_reviewed(client, db, monkeypatch):

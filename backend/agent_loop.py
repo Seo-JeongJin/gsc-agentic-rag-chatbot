@@ -61,6 +61,11 @@ async def _mock_llm_response(messages: list[dict], tools: list[dict] | None, thi
     """
     tool_messages = [m for m in messages if m["role"] == "tool"]
 
+    # 도구 목록을 아예 안 받은 호출(잡담 경로 use_tools=False, 2026-11-09 D14)은 실제 LLM처럼 검색 없이 바로 답함.
+    # 빈 목록([])은 "MCP 연결 직후라 아직 목록이 없음"이라 기존처럼 검색하는 척함(테스트들이 이 동작을 씀).
+    if tools is None:
+        return {"role": "assistant", "content": "(가짜 답변) 네, 궁금한 점을 물어봐 주세요.", "tool_calls": None}
+
     if not tool_messages:
         last_user_message = next(m["content"] for m in reversed(messages) if m["role"] == "user")
         return {
@@ -239,7 +244,13 @@ def _escalation(tool_call_count: int, grounding_parts: list[str]) -> dict:
     }
 
 
-async def run_agent_loop(question_text: str, history: list[dict], system_prompt: str | None = None) -> dict:
+async def run_agent_loop(
+    question_text: str,
+    history: list[dict],
+    system_prompt: str | None = None,
+    use_tools: bool = True,
+    follow_up_reminder: bool = True,
+) -> dict:
     """
     Agent 루프의 본체. 5~12번 단계를 수행.
 
@@ -252,9 +263,13 @@ async def run_agent_loop(question_text: str, history: list[dict], system_prompt:
     system_prompt: 기본(None)은 SYSTEM_PROMPT. 개인 자격 판정 질문은 main.py가 ELIGIBILITY_PROMPT를 넘김(2026-10-29 B9 —
     question_router.py 참고). 기본값을 함수 정의가 아니라 실행 시점에 정하는 이유: 실험·테스트에서 모듈의 SYSTEM_PROMPT를
     바꿔 끼웠을 때 그 값이 그대로 쓰이게.
+    use_tools / follow_up_reminder (2026-11-09 B22·D14): 잡담·되묻기(CHAT)는 main.py가 둘 다 False로 부름.
+    use_tools=False면 도구 목록을 아예 안 보내고(None — LLM이 검색을 못 함), 그래도 LLM이 tool_calls를 내면 실행하지 않고
+    함께 온 글을 답으로 씀("검색 안 함"을 프롬프트가 아니라 코드가 보장). follow_up_reminder=False면 재검색 알림을 안 붙임.
     """
-    tools = mcp_client.get_cached_tools()  # 0번 단계에서 캐싱해둔 도구 목록
-    allowed_tools = {t["function"]["name"] for t in tools if "function" in t}
+    # 0번 단계에서 캐싱해둔 도구 목록. 도구를 안 쓰는 경로는 None(빈 목록이 아니라) — llm_client가 tools 키를 아예 빼서 보냄
+    tools = mcp_client.get_cached_tools() if use_tools else None
+    allowed_tools = {t["function"]["name"] for t in tools or [] if "function" in t}
 
     # 5번: 시스템 프롬프트 + 4번에서 가져온 과거 대화(길이 상한 안으로 줄여서) + 이번 질문을 합쳐 대화기록 구성
     messages: list[dict] = (
@@ -262,7 +277,7 @@ async def run_agent_loop(question_text: str, history: list[dict], system_prompt:
         + (history_used := _trim_history(history))
         # 이전 대화가 있으면 질문 뒤에 재검색 알림을 붙임(2026-10-29 실측 B11 — system_prompt.FOLLOW_UP_SEARCH_REMINDER 참고).
         # LLM에 보내는 메시지에만 붙고, main.py가 DB 저장·출력 검토에 쓰는 질문은 원래 question_text 그대로.
-        + [{"role": "user", "content": question_text + (FOLLOW_UP_SEARCH_REMINDER if history_used else "")}]
+        + [{"role": "user", "content": question_text + (FOLLOW_UP_SEARCH_REMINDER if history_used and follow_up_reminder else "")}]
     )
 
     tool_call_count = 0
@@ -275,8 +290,8 @@ async def run_agent_loop(question_text: str, history: list[dict], system_prompt:
         # 6번/10번: LLM 호출 (비스트리밍 — tool_calls 파싱에 완성된 응답이 필요)
         response = await generate_llm_response(messages, tools, thinking)
 
-        # 7번: 응답 파싱 — tool_calls가 없으면 최종 답변
-        if not response.get("tool_calls"):
+        # 7번: 응답 파싱 — tool_calls가 없으면 최종 답변. 도구를 안 쓰는 경로면 tool_calls가 와도 실행하지 않고 최종 답변으로 봄
+        if not response.get("tool_calls") or not use_tools:
             answer = (response.get("content") or "").strip()
             if not answer:
                 # 도구도 안 부르고 답도 비어 있음 — 빈 말풍선을 내보내지 않고 연락처 안내로(리뷰 3번)

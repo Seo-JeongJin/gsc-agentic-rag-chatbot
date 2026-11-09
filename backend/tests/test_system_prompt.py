@@ -35,6 +35,29 @@ def test_follow_up_reminder_has_greeting_exception():
     assert "감사·인사·잡담이면 검색하지 말고 짧게 답할 것" in FOLLOW_UP_SEARCH_REMINDER
 
 
+def test_chat_prompt_keeps_answers_short_and_without_new_facts():
+    """[2026-11-09 B22·D14] 잡담·되묻기(CHAT) 전용 프롬프트 — 도구 없이 답하므로 새 학과 정보를 지어내면 안 되고,
+    "잘 모르는거야?"에 앞 답(학과 설명)을 길게 반복하지 않게 짧게. 내부 정보는 안내 불가(기본 프롬프트 6번과 같은 규칙)."""
+    from system_prompt import CHAT_PROMPT
+
+    assert "1~2문장" in CHAT_PROMPT
+    assert "새로운 학과·입학 정보" in CHAT_PROMPT
+    assert "내부 정보" in CHAT_PROMPT
+    assert "한국어" in CHAT_PROMPT
+
+
+def test_fixed_meta_and_out_of_scope_replies():
+    """META(내부 정보·인젝션·남의 개인정보)·OOS(날씨·맛집)는 LLM 없이 고정 문구 — 모델이 "메모리 안 써요"처럼 지어낼 여지를 없앰(B22).
+    META 문구는 "넌 누구야"가 META로 분류돼도 자연스럽게 챗봇 소개로 시작. 둘 다 물어볼 수 있는 주제로 다시 이끌어 줌."""
+    from system_prompt import META_RESPONSE, OOS_RESPONSE
+
+    assert META_RESPONSE.startswith("저는 글로벌시스템융합과 입학 상담 챗봇이에요")
+    assert "안내해드리기 어려워요" in META_RESPONSE
+    assert "입학 상담 챗봇" in OOS_RESPONSE
+    for text in (META_RESPONSE, OOS_RESPONSE):
+        assert "모집" in text or "입학" in text
+
+
 def test_ineffective_rule_15_1_is_removed_from_main_prompt():
     """[B9 1차 시도] 기본 프롬프트에 넣었던 15-1번은 실측에서 효과가 없었음(9/9 여전히 판정) — 개인 자격 질문은 이제
     전용 프롬프트로 가므로 기본 프롬프트에서 뺌(남기면 프롬프트만 길어짐)."""

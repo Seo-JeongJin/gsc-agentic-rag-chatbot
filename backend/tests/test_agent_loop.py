@@ -117,6 +117,53 @@ async def test_custom_system_prompt_replaces_default(fake_mcp, monkeypatch):
     assert seen_system[-1] == agent_loop.SYSTEM_PROMPT
 
 
+async def test_without_tools_llm_gets_no_tool_list_and_no_reminder(fake_mcp, monkeypatch):
+    """[2026-11-09 B22·D14] 잡담·되묻기(CHAT)는 main.py가 use_tools=False, follow_up_reminder=False로 부름.
+    도구 목록 자체를 안 보내야(None) LLM이 검색을 못 함 — "잘 모르는거야?"에 검색해서 앞 주제를 반복하던 버그의 원인 차단.
+    재검색 알림도 안 붙어야 함(알림이 "다시 검색"을 시키던 게 원인 중 하나). 이전 대화는 그대로 보여줌("방금 뭐라 했어?"에 답하려면 필요)."""
+    from system_prompt import FOLLOW_UP_SEARCH_REMINDER
+
+    seen = []
+    original = agent_loop.generate_llm_response
+
+    async def spy(messages, tools, thinking):
+        seen.append((tools, [dict(m) for m in messages]))
+        return await original(messages, tools, thinking)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
+    monkeypatch.setattr(agent_loop.mcp_client, "get_cached_tools",
+                        lambda: [{"type": "function", "function": {"name": "search_documents"}}])
+    history = [{"role": "user", "content": "글로벌시스템융합과란?"}, {"role": "assistant", "content": "AI를 배우는 학과예요."}]
+
+    result = await agent_loop.run_agent_loop("잘 모르는거야?", history=history, system_prompt="대화 프롬프트",
+                                             use_tools=False, follow_up_reminder=False)
+
+    tools, messages = seen[0]
+    assert tools is None
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[-1]["content"] == "잘 모르는거야?"
+    assert FOLLOW_UP_SEARCH_REMINDER not in messages[-1]["content"]
+    assert fake_mcp == [] and result["tool_call_count"] == 0
+    assert result["answer_text"]
+
+
+async def test_without_tools_stray_tool_call_is_not_executed(fake_mcp, monkeypatch):
+    """도구 목록을 안 줬는데도 LLM이 tool_calls를 내면(형식 오류 등) 코드가 실행하지 않음 — "검색 안 함"은 프롬프트가 아니라
+    코드가 보장(판단은 LLM, 제약은 코드). 함께 온 글이 있으면 그걸 답으로 씀."""
+    async def stray(messages, tools, thinking):
+        return {"role": "assistant", "content": "네, 다시 물어봐 주세요.",
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "search_documents", "arguments": "{}"}}]}
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", stray)
+
+    result = await agent_loop.run_agent_loop("잘 모르는거야?", history=[], use_tools=False, follow_up_reminder=False)
+
+    assert fake_mcp == []
+    assert result["answer_text"] == "네, 다시 물어봐 주세요."
+    assert result["tool_call_count"] == 0
+
+
 async def test_loop_limit_returns_escalation_and_needs_review(fake_mcp, monkeypatch):
     """LLM이 계속 도구만 부르고 답을 안 내는 상황 — 코드가 상한(4회)에서 강제로 끊어야 함(11번 단계).
     이때 연락처 안내 문구 + 관리자 검토 필요(insufficient_info) 표시가 되는지 확인.
