@@ -20,14 +20,16 @@ def test_uses_database_url_when_given(monkeypatch):
     assert connection._database_url() == "postgresql://u:p@db:5432/rag"
 
 
-def test_builds_localhost_url_from_postgres_vars(monkeypatch):
-    """DATABASE_URL이 없으면(로컬 직접 실행) .env의 POSTGRES_* 값으로 localhost 주소를 만듦."""
+def test_builds_local_url_from_postgres_vars(monkeypatch):
+    """DATABASE_URL이 없으면(로컬 직접 실행) .env의 POSTGRES_* 값으로 이 PC 주소를 만듦.
+    주소는 localhost가 아니라 127.0.0.1(2026-11-09 S2): docker-compose가 DB 포트를 127.0.0.1에만 열자, Windows의 localhost가
+    IPv6(::1)를 먼저 시도해서 접속마다 2초씩 늦어졌음(pytest 12초 → 3분 33초)."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("POSTGRES_USER", "u")
     monkeypatch.setenv("POSTGRES_PASSWORD", "p")
     monkeypatch.setenv("POSTGRES_DB", "rag")
 
-    assert connection._database_url() == "postgresql://u:p@localhost:5432/rag"
+    assert connection._database_url() == "postgresql://u:p@127.0.0.1:5432/rag"
 
 
 def test_missing_env_gives_clear_error_instead_of_keyerror(monkeypatch):

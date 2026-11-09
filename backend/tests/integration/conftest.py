@@ -47,10 +47,10 @@ FAKE_SEARCH_RESULT = [
 
 
 def _db_url(dbname: str) -> str:
-    """POSTGRES_* 값(.env, db.connection import 시 로드됨)으로 localhost 접속 주소를 만듦.
-    호스트/포트는 기본 localhost:5432(docker-compose가 호스트에 열어둔 포트), 필요하면 환경변수로 변경.
+    """POSTGRES_* 값(.env, db.connection import 시 로드됨)으로 이 PC 접속 주소를 만듦.
+    호스트/포트는 기본 127.0.0.1:5432(docker-compose가 이 PC에만 열어둔 포트), 필요하면 환경변수로 변경.
     .env가 없으면 KeyError — 아래 test_database_url이 이걸 잡아서 통합 테스트를 skip 처리함."""
-    host = os.environ.get("TEST_DB_HOST", "localhost")
+    host = os.environ.get("TEST_DB_HOST", "127.0.0.1")  # 127.0.0.1: localhost는 Windows에서 IPv6(::1)를 먼저 시도 → compose가 127.0.0.1에만 열어서 접속마다 2초 지연(2026-11-09)
     port = os.environ.get("TEST_DB_PORT", "5432")
     return (
         f"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"

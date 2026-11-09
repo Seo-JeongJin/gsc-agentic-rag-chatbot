@@ -25,7 +25,7 @@ _pool: asyncpg.Pool | None = None
 
 def _database_url() -> str:
     """DB 접속 주소를 결정. DATABASE_URL이 명시돼 있으면(Docker Compose) 그걸 쓰고,
-    없으면(로컬 직접 실행) .env의 POSTGRES_* 값으로 localhost 접속 주소를 조립함.
+    없으면(로컬 직접 실행) .env의 POSTGRES_* 값으로 이 PC(127.0.0.1) 접속 주소를 조립함.
 
     import 시점이 아니라 "처음 연결할 때" 호출되는 함수로 둔 이유(2026-10-28 버그 수정):
     전엔 파일 맨 위에서 바로 os.environ['POSTGRES_USER']를 읽어서, .env가 없는 환경(새로 clone한 컴퓨터,
@@ -42,7 +42,7 @@ def _database_url() -> str:
         )
     return (
         f"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
-        f"@localhost:5432/{os.environ['POSTGRES_DB']}"
+        f"@127.0.0.1:5432/{os.environ['POSTGRES_DB']}"  # 127.0.0.1: localhost는 Windows에서 IPv6(::1)를 먼저 시도 → compose가 127.0.0.1에만 열어서 접속마다 2초 지연(2026-11-09)
     )
 
 

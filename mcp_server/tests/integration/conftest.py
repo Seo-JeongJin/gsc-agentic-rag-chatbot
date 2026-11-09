@@ -36,8 +36,8 @@ async def async_fake_embed(text: str) -> list[float]:
 
 
 def _db_url(dbname: str) -> str:
-    """.env(db.py import 시 로드됨)의 POSTGRES_* 값으로 localhost 주소 생성. 값이 없으면 KeyError → skip 처리됨."""
-    host = os.environ.get("TEST_DB_HOST", "localhost")
+    """.env(db.py import 시 로드됨)의 POSTGRES_* 값으로 이 PC(127.0.0.1) 주소 생성. 값이 없으면 KeyError → skip 처리됨."""
+    host = os.environ.get("TEST_DB_HOST", "127.0.0.1")  # 127.0.0.1: localhost는 Windows에서 IPv6(::1)를 먼저 시도 → compose가 127.0.0.1에만 열어서 접속마다 2초 지연(2026-11-09)
     port = os.environ.get("TEST_DB_PORT", "5432")
     return (
         f"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"

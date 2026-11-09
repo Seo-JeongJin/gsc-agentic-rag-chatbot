@@ -38,10 +38,10 @@ REVIEW_WAIT_SECONDS = 30.0  # 백그라운드 출력 검토(생각모드, 실측
 
 
 def _db_url() -> str:
-    """.env의 POSTGRES_* 값으로 호스트에서 접속하는 주소 — docker-compose가 5432를 호스트에 열어둠."""
+    """.env의 POSTGRES_* 값으로 호스트에서 접속하는 주소 — docker-compose가 5432를 이 PC(127.0.0.1)에만 열어둠."""
     load_dotenv(ROOT.parent / ".env")
     return (f"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
-            f"@{os.environ.get('FIELD_TEST_DB_HOST', 'localhost')}:5432/{os.environ['POSTGRES_DB']}")
+            f"@{os.environ.get('FIELD_TEST_DB_HOST', '127.0.0.1')}:5432/{os.environ['POSTGRES_DB']}")
 
 
 def check(expect: dict, answer: str, row: dict | None) -> dict:
