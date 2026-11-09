@@ -89,11 +89,11 @@ async def test_reset_conversation_clears_short_term_memory(client, db):
 # ----- 과거답변 검색용 질문 임베딩 저장 (리뷰 1번, 3단계) -----
 
 
-async def test_answered_question_gets_embedding_for_past_answer_search(client, db, monkeypatch):
-    """[1번 버그 재현] 정상 답변 + 출력 가드레일 통과한 질문은 응답 후 백그라운드로 임베딩이 저장돼야 함
-    — 그래야 다음 사람이 비슷한 질문을 할 때 search_past_answers의 벡터 검색에 걸림.
-    수정 전엔 임베딩을 저장하는 코드가 아예 없어서 질문 25건 중 0건이 임베딩을 갖고 있었음.
-    MCP 서버의 임베딩 API는 가짜로 바꿔 끼우고, 실제로 호출됐는지도 기록해서 확인."""
+async def test_answered_question_is_not_embedded_while_long_term_memory_is_off(client, db, monkeypatch):
+    """(2026-11-09) 롱텀 메모리(과거답변 검색)를 끄면서 질문 임베딩 저장도 멈춤 — 검색 도구가 LLM에 안 보이니 저장해도 쓰이지 않고,
+    질문마다 임베딩 계산(GPU)만 듦. 실측: 도구를 열어뒀을 때도 A 21문항에서 0번 호출됨.
+    (예전 테스트는 "정상 답변이면 임베딩 저장"을 확인했음 — 리뷰 1번. 다시 켜면 main.LONG_TERM_MEMORY_ENABLED=True로 그 동작이 돌아옴)
+    MCP 서버의 임베딩 API는 가짜로 바꿔 끼우고, 호출되지 않았는지 확인."""
     import mcp_client
 
     calls = []
@@ -103,6 +103,29 @@ async def test_answered_question_gets_embedding_for_past_answer_search(client, d
         return [0.1] * 1024
 
     monkeypatch.setattr(mcp_client, "embed_text", fake_embed_text)
+
+    qid = (await _ask(client, "기숙사 신청 방법 알려주세요"))["question_id"]
+
+    assert calls == []
+    assert await db.fetchval("SELECT embedding IS NULL FROM questions WHERE id=$1", qid) is True
+    # 검토 자체는 그대로 돌아서 결과가 기록돼야 함 — 끈 건 임베딩 저장뿐
+    assert await db.fetchval("SELECT guardrail_passed FROM questions WHERE id=$1", qid) is True
+
+
+async def test_answered_question_is_embedded_when_long_term_memory_is_on(client, db, monkeypatch):
+    """다시 켜면(LONG_TERM_MEMORY_ENABLED=True) 예전처럼 정상 답변 + 검토 통과 질문의 임베딩을 저장 — 숨겨둔 코드가 깨지지 않았는지 지킴.
+    [리뷰 1번 재현 테스트였던 것] 수정 전엔 임베딩을 저장하는 코드가 아예 없어서 질문 25건 중 0건이 임베딩을 갖고 있었음."""
+    import main
+    import mcp_client
+
+    calls = []
+
+    async def fake_embed_text(text):
+        calls.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(mcp_client, "embed_text", fake_embed_text)
+    monkeypatch.setattr(main, "LONG_TERM_MEMORY_ENABLED", True)
 
     qid = (await _ask(client, "기숙사 신청 방법 알려주세요"))["question_id"]
 

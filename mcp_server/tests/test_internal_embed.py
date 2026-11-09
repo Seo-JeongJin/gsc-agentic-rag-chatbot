@@ -39,11 +39,13 @@ def test_embed_rejects_missing_or_blank_text(monkeypatch):
 
 async def test_embed_api_is_not_exposed_as_mcp_tool():
     """/internal/embed는 일반 HTTP 엔드포인트라 LLM이 받는 도구 목록에는 나타나면 안 됨
-    — 도구로 만들면 LLM이 "embed"를 검색 도구처럼 호출해버릴 수 있음. 도구는 검색 2개뿐이어야 함."""
+    — 도구로 만들면 LLM이 "embed"를 검색 도구처럼 호출해버릴 수 있음.
+    (2026-11-09) 과거답변 검색(search_past_answers)도 도구 목록에서 뺌 — 실측 A 21문항에서 모델이 0번 불렀고(문서 검색만 21번),
+    열어두면 다른 사람의 질문·답이 섞일 위험(리뷰 19)만 남음. 그래서 LLM이 받는 도구는 문서 검색 하나뿐."""
     async with Client(server.mcp) as client:
         tools = await client.list_tools()
 
-    assert {t.name for t in tools} == {"search_documents", "search_past_answers"}
+    assert {t.name for t in tools} == {"search_documents"}
 
 
 def test_embed_rejects_non_json_body(monkeypatch):

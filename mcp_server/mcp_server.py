@@ -1,5 +1,6 @@
 """
-MCP 서버 — FastMCP로 search_documents/search_past_answers를 "도구(tool)"로 노출.
+MCP 서버 — FastMCP로 search_documents를 "도구(tool)"로 노출.
+(search_past_answers는 2026-11-09부터 도구 목록에서 숨김 — 아래 함수 주석 참고)
 
 실제 배포 시에는 이 파일이 별도 Docker 컨테이너로 떠서, FastAPI 쪽의 mcp_client.py가
 HTTP로 이 서버에 접속해 도구 목록을 받아오고(0번), 도구 호출을 중계(8번)한다.
@@ -29,7 +30,9 @@ async def search_documents(query: str) -> list[dict]:
     return await _search_documents(query)
 
 
-@mcp.tool()
+# (2026-11-09 사용자 결정) 롱텀 메모리 끔 — @mcp.tool()을 빼서 LLM이 받는 도구 목록에서 숨김(코드는 남겨둠).
+# 왜: 실측 A 21문항에서 모델이 이 도구를 0번 불렀고(문서 검색만 21번), 열어두면 다른 사람의 질문·답이 섞일 위험(리뷰 19)만 남음.
+# 다시 켜려면: 아래에 @mcp.tool()을 다시 붙이고 backend/main.py의 LONG_TERM_MEMORY_ENABLED=True(질문 임베딩 저장 재개).
 async def search_past_answers(query: str) -> list[dict]:
     """이미 답변된 과거 질문 중 이번 질문과 비슷한 것을 하이브리드 검색으로 찾는다."""
     return await _search_past_answers(query)

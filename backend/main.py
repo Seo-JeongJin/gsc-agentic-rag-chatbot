@@ -31,6 +31,12 @@ from system_prompt import CHAT_PROMPT, ELIGIBILITY_PROMPT, META_RESPONSE, OOS_RE
 # uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
 logger = logging.getLogger("uvicorn.error")
 
+# 롱텀 메모리(과거답변 검색) 스위치 — 2026-11-09 사용자 결정으로 끔(False).
+# 왜: 실측 A 21문항에서 모델이 search_past_answers를 0번 불렀음(문서 검색만 21번). 쓰이지 않는데 질문마다 임베딩 계산(GPU)이 들고,
+#     열어두면 다른 사람의 질문·답이 섞일 위험(리뷰 19)만 남음. 그래서 MCP 서버는 도구 목록에서 숨기고, 여기선 질문 임베딩 저장을 멈춤.
+# 다시 켜려면: True + mcp_server/mcp_server.py의 search_past_answers에 @mcp.tool() 다시 붙이기(코드·DB 칸은 그대로 남아 있음).
+LONG_TERM_MEMORY_ENABLED = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -155,7 +161,8 @@ async def review_in_background(
         if review is None or review["verdict"] == "fail" or needs_review or unsupported_numbers:
             logger.warning("출력 검토 확인 필요 | question_id=%s | 질문: %s | 답변: %s", question_id, question_text, answer_text)
 
-        if guardrail_passed and not needs_review:
+        # 롱텀 메모리를 끈 동안(LONG_TERM_MEMORY_ENABLED=False)은 임베딩을 안 만듦 — 검색 도구가 숨겨져 있어 저장해도 쓰이지 않음
+        if LONG_TERM_MEMORY_ENABLED and guardrail_passed and not needs_review:
             await store_question_embedding(question_id, question_text)
     except Exception as e:  # noqa: BLE001 — 백그라운드 실패가 서비스에 영향 주면 안 됨
         logger.warning("출력 검토(백그라운드) 실패(question_id=%s): %s", question_id, e)
