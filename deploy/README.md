@@ -39,7 +39,7 @@ nano .env
 `.env`에 넣을 값(설명은 `.env.example` 주석):
 | 항목 | 값 |
 |---|---|
-| `POSTGRES_PASSWORD` | **새로 만든 긴 무작위 값** — `openssl rand -base64 24`로 생성. 학과 PC 값을 쓰지 말 것 |
+| `POSTGRES_PASSWORD` | **새로 만든 긴 무작위 값** — `openssl rand -hex 24`로 생성(숫자·알파벳만). 학과 PC 값을 쓰지 말 것 |
 | `LLM_MODE` / `EMBEDDING_MODE` | `vllm` / `vllm` |
 | `VLLM_URL` | `http://host.docker.internal:8000` (같은 서버의 vLLM — 안 되면 "문제가 생기면" 참고) |
 | `VLLM_MODEL` | `curl http://localhost:8000/v1/models`의 `id` |
@@ -49,6 +49,9 @@ nano .env
 | `NGINX_CONF` | **지금은 적지 않음** — 6단계에서 https 인증서를 받은 뒤 추가 |
 
 `.env`는 git에 올라가지 않음(비밀번호가 있음). 다른 사람이 못 읽게: `chmod 600 .env`
+- 비밀번호를 `hex`로 만드는 이유: DB 접속 주소(`postgresql://rag:<비밀번호>@db…`) 안에 들어가서, `base64`처럼 `/`·`+`가 섞이면 주소가 깨질 수 있음.
+- 사람이 입력할 일은 없음(컨테이너끼리 씀). **처음 실행할 때 DB가 이 값으로 만들어지므로 나중에 바꾸지 말 것**(바꾸면 접속이 안 됨).
+- 화면에 비밀번호를 띄우지 않고 만드는 예: `.env`의 그 줄을 `POSTGRES_PASSWORD=$(openssl rand -hex 24)`로 쓰고 `cat > .env <<EOF … EOF`로 생성.
 
 ## 3. FAQ 문서 복사
 검색 대상 문서는 git에 없음. **학과 PC에서** 서버로 복사:
@@ -56,12 +59,15 @@ nano .env
 scp data/<FAQ파일>.md <계정>@aihub.yju.ac.kr:~/gsc-agentic-rag-chatbot/data/
 ```
 
-## 4. 실행
+## 4. 실행 — 챗봇 3개만 먼저 (nginx는 6단계에서)
 ```bash
-cp deploy/nginx/admin-allow.conf.example deploy/nginx/admin-allow.conf   # 관리자 영역 허용 IP(7단계에서 채움)
-docker compose --profile deploy up -d --build     # 처음엔 빌드에 몇 분
-docker compose --profile deploy ps                # db·mcp_server·backend·nginx·certbot 5개가 Up인지
+cp deploy/nginx/admin-allow.conf.example deploy/nginx/admin-allow.conf   # 관리자 영역 허용 IP 파일(git 제외)
+docker compose up -d --build                      # --profile deploy 없이 → db·mcp_server·backend 3개만. 처음엔 빌드 5~15분
+docker compose ps                                 # 3개가 Up인지(db·mcp_server는 healthy까지)
 ```
+- **nginx를 아직 안 띄우는 이유**: nginx가 뜨는 순간 80번으로 외부에 열림. https와 학교 IP 제한(6·7단계)을 하기 전에 열리지 않게,
+  확인하는 동안은 챗봇을 서버 안(127.0.0.1:8080)에서만 접속되게 둠.
+- 원래 서버에 있던 컨테이너(vLLM 등)는 그대로인지도 확인: `docker ps`
 **vLLM 접속 확인**(가장 먼저 — 안 되면 챗봇이 답을 못 함):
 ```bash
 docker compose exec backend python3 -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models', timeout=10).status)"
@@ -78,6 +84,13 @@ docker compose exec backend python3 create_admin_cli.py <아이디> '<10자 이�
 - 비밀번호는 10자 미만이면 거부됨. 특수문자가 있으면 작은따옴표로 감쌀 것.
 
 ## 6. https 인증서
+**먼저 관리자 영역을 전부 잠금** — 아래 스크립트가 nginx를 띄우는 순간 외부에 열리므로, 학교 IP를 확인하기(7단계) 전까지 대시보드가 밖에서 보이지 않게.
+위젯 파일·질문·인증서 확인 경로는 이 목록과 상관없이 열려 있어서 발급에는 영향 없음.
+```bash
+printf '# 임시: 학교 IP 확인 전까지 관리자 영역 전부 차단
+deny all;
+' > deploy/nginx/admin-allow.conf
+```
 ```bash
 ./deploy/init-https.sh <인증서 만료 알림 받을 이메일> --staging   # ① 연습 발급 — 외부에서 80번 확인이 되는지
 ./deploy/init-https.sh <이메일>                                   # ② 진짜 발급
@@ -87,30 +100,55 @@ docker compose exec backend python3 create_admin_cli.py <아이디> '<10자 이�
 echo "NGINX_CONF=nginx.https.conf" >> .env
 docker compose --profile deploy up -d nginx certbot
 ```
-확인: 브라우저에서 `https://aihub.yju.ac.kr/widget-test/` → 자물쇠, `http://`로 열면 `https://`로 넘어감.
+확인(서버에서):
+```bash
+docker compose --profile deploy ps                                   # 5개 Up
+echo | openssl s_client -connect aihub.yju.ac.kr:443 -servername aihub.yju.ac.kr 2>/dev/null | openssl x509 -noout -issuer -enddate   # Let's Encrypt, STAGING 없음
+curl -s -o /dev/null -w '%{http_code}
+' https://aihub.yju.ac.kr/widget.js   # 200
+curl -s -o /dev/null -w '%{http_code}
+' https://aihub.yju.ac.kr/            # 403(아직 잠금)
+```
 - 연습부터 하는 이유: Let's Encrypt 진짜 서버는 실패를 반복하면 한동안 발급을 막음.
 - 인증서는 90일짜리지만 certbot 컨테이너가 자동 갱신(하루 두 번 확인), nginx는 6시간마다 새 인증서를 다시 읽음.
 
 ## 7. 관리자 영역을 학교 IP만으로
-대시보드(`/`)·`/admin/`·`/docs`는 학교에서만 열리게(위젯·질문 API는 누구나).
-1. **학교 PC**에서 `https://aihub.yju.ac.kr/` 접속
-2. 서버에서 그 접속이 어떤 IP로 들어왔는지 확인 — 각 줄 맨 앞 숫자:
+대시보드(`/`)·`/admin/`·`/docs`·위젯 시험 페이지(`/widget-test/`)는 허용한 IP에서만(위젯 파일 `/widget.js`·질문 `/api/`는 누구나).
+1. **허용할 학교 PC**에서 표시를 붙여 접속(막혀서 403이 나도 IP는 기록에 남음):
    ```bash
-   docker compose --profile deploy logs nginx | tail -20
+   curl -s -o /dev/null -A "my-pc-check" https://aihub.yju.ac.kr/     # 또는 브라우저로 https://aihub.yju.ac.kr/ 접속
    ```
-3. `deploy/nginx/admin-allow.conf`(git 제외 파일)를 편집 — `allow all;`을 지우고:
+2. 서버에서 그 접속이 어떤 IP로 들어왔는지 확인 — 맨 앞 숫자:
+   ```bash
+   docker compose --profile deploy logs nginx | grep my-pc-check | awk '{print $3}'
+   ```
+   학교 PC는 보통 **내부 IP(`10.x.x.x`)**로 보임(학교 안쪽 망이라 공인 주소로 바뀌지 않고 그대로 옴).
+3. `deploy/nginx/admin-allow.conf`(git 제외 파일)에 **확인된 IP만** 적음:
    ```
    allow <2번에서 본 IP>;
    deny  all;
    ```
-4. 적용: `docker compose --profile deploy exec nginx nginx -s reload`
+   학교 주소 범위 전체(`10.0.0.0/8` 등)를 여는 건 학교 네트워크 구성을 확인한 뒤에만. 다른 PC는 403이 나면 같은 방법으로 한 줄씩 추가.
+4. 적용(문법 검사가 통과해야만 적용됨, 접속은 안 끊김):
+   ```bash
+   docker compose --profile deploy exec nginx nginx -t && docker compose --profile deploy exec nginx nginx -s reload
+   ```
 
 ## 8. 외부에서 확인 (휴대폰, 와이파이 끄고 LTE)
 | 확인 | 기대 |
 |---|---|
-| `https://aihub.yju.ac.kr/widget-test/` → 위젯에서 질문 | 답이 옴, 자물쇠 |
+| `https://aihub.yju.ac.kr/widget.js` | 위젯 코드 글자가 보임(열림 — 홈페이지가 불러가는 파일) |
 | `https://aihub.yju.ac.kr/` (대시보드) | **403** (학교 밖이라 막힘) |
-| 학교 PC에서 `https://aihub.yju.ac.kr/` | 대시보드 로그인 화면 |
+| `https://aihub.yju.ac.kr/widget-test/` (시험 페이지) | **403** (허용 IP 전용) |
+| `http://aihub.yju.ac.kr/widget.js` | `https://`로 자동 이동 |
+| 허용한 학교 PC에서 `https://aihub.yju.ac.kr/` | 대시보드 로그인 화면 → 로그인 |
+| 허용한 학교 PC에서 `https://aihub.yju.ac.kr/widget-test/` → 위젯에서 질문 | 답이 옴 |
+- 아이폰 사파리는 정상 https에 자물쇠를 따로 안 보여줌 — "안전하지 않음" 경고가 없으면 정상.
+- **시험 질문도 실제 질문처럼 DB에 저장됨** → 정식 오픈 전에 지움:
+  ```bash
+  docker compose exec -T db psql -U rag -d rag -c "SELECT id, session_id, left(question_text,30), created_at FROM questions ORDER BY id;"
+  docker compose exec -T db psql -U rag -d rag -c "DELETE FROM questions WHERE session_id='<세션>'; DELETE FROM sessions WHERE session_id='<세션>';"
+  ```
 
 ## 9. 학과 홈페이지에 위젯 붙이기
 워드프레스 관리자 화면(Elementor → Custom Code 등)에서 **모든 페이지의 body 끝**에 이 한 줄:
