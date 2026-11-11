@@ -30,7 +30,8 @@ import httpx
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
-API_URL = os.environ.get("FIELD_TEST_API", "http://localhost:8080/api/ask")
+# 127.0.0.1(localhost 아님, 2026-11-11 배포 0-3): compose가 8080을 127.0.0.1에만 열어서, Windows의 localhost가 IPv6(::1)를 먼저 시도하면 요청마다 2초 지연
+API_URL = os.environ.get("FIELD_TEST_API", "http://127.0.0.1:8080/api/ask")
 CONTACT_PATTERNS = ["053-940-5441", "053) 940-5441", "@gsc.yju", "gsc.yju"]  # 학과 연락처 안내가 들어갔는지 판단용
 SESSION_PREFIX = "fieldtest"
 REQUEST_TIMEOUT = 150.0  # 긴 절차 설명은 실측 7초 안팎 — LLM 재시도까지 감안해 넉넉히

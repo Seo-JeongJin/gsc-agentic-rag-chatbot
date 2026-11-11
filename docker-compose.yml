@@ -39,6 +39,9 @@ services:
       EMBEDDING_MODE: ${EMBEDDING_MODE:?.env에 EMBEDDING_MODE(local 또는 vllm)가 필요합니다}
       EMBEDDING_URL: ${EMBEDDING_URL:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+    # 같은 서버의 vLLM 임베딩(8001)을 host.docker.internal로 찾게 함 — 이유는 backend의 extra_hosts 주석 참고(배포 0-4)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # 127.0.0.1에만 엶(2026-11-09 S2) — 인증 없는 /internal/embed(임베딩 API)를 다른 컴퓨터가 마구 불러 GPU를 쓰지 못하게.
       # backend 컨테이너는 내부망(mcp_server:9000)으로 붙고, 집에서 backend를 Docker 밖에서 돌릴 때도 127.0.0.1:9000이라 그대로 됨.
@@ -78,8 +81,16 @@ services:
       LLM_MODE: ${LLM_MODE:?.env에 LLM_MODE(mock 또는 vllm)가 필요합니다}
       VLLM_URL: ${VLLM_URL:-}
       VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3-14B-AWQ}
+    # 컨테이너 안에서 "이 컨테이너를 띄운 서버 자신"을 host.docker.internal이라는 이름으로 찾게 함(2026-11-11 배포 0-4).
+    # 배포 서버(GPU 서버)에선 vLLM이 Docker 밖, 같은 서버에서 8000·8001로 돌기 때문에 .env에 VLLM_URL=http://host.docker.internal:8000으로 씀.
+    # 리눅스 Docker엔 이 이름이 기본으로 없어서 직접 알려줘야 함(Windows Docker Desktop엔 원래 있어서 학과 PC에선 있어도 없어도 같음).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "8080:8080"
+      # 127.0.0.1에만 엶(2026-11-11 배포 0-3) — 외부 요청은 nginx(80·443)를 거쳐야만 들어오게. 8080이 열려 있으면 nginx를 건너뛰어
+      # 대시보드 IP 제한·https가 소용없어짐. nginx는 Docker 내부망(backend:8080)으로 붙으므로 영향 없고,
+      # 이 PC의 실측 도구·위젯 시험 페이지·대시보드는 이 PC 안에서 접속하니 그대로 됨.
+      - "127.0.0.1:8080:8080"
     # 전에는 "컨테이너가 시작됐는지"만 기다려서, MCP 서버가 아직 포트를 열기 전에 backend가 먼저 떠서
     # 연결 실패로 종료되는 문제가 재빌드할 때마다 생겼음(리뷰 15번). 이제 healthcheck 통과(=실제로 준비됨)까지 기다림.
     # 그래도 실패하면 mcp_client.py의 연결 재시도 → 그래도 안 되면 restart 정책이 컨테이너를 다시 띄움(3중 안전장치).
@@ -90,6 +101,45 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # 외부 요청을 받는 문지기 — 배포 서버(aihub.yju.ac.kr)에서만 켬 (2026-11-11 배포 0-1, 0-2에서 https 추가).
+  # profiles: ["deploy"] — 그냥 `docker compose up`(학과 PC 실측·집 개발)에선 안 뜨고,
+  # `docker compose --profile deploy up -d`일 때만 뜸. 그래서 지금까지의 개발 방식은 그대로임.
+  nginx:
+    image: nginx:1.27-alpine   # 버전 고정 — latest를 쓰면 언젠가 재배포할 때 모르는 새 버전이 깔려 동작이 바뀔 수 있음
+    container_name: rag_nginx
+    profiles: ["deploy"]
+    ports:
+      # 학교 방화벽이 열어준 80·443. 다른 프로그램이 쓰는 컴퓨터에서 시험할 땐 .env에 NGINX_HTTP_PORT=8081처럼 바꿔 씀
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      # 어느 설정을 쓸지 .env의 NGINX_CONF로 고름 — 기본은 http 전용(nginx.http.conf). 인증서를 받은 뒤 nginx.https.conf로 바꿈.
+      # 기본이 http인 이유: 인증서가 없는 새 서버에서 https 설정으로 켜면 인증서 파일을 못 찾아 nginx가 계속 죽음(첫 발급 순서는 deploy/init-https.sh).
+      - ./deploy/nginx/${NGINX_CONF:-nginx.http.conf}:/etc/nginx/conf.d/default.conf:ro   # 읽기 전용 — 컨테이너가 설정을 바꾸지 못하게
+      - certbot_conf:/etc/letsencrypt:ro      # 인증서(certbot이 받아서 넣음) — nginx는 읽기만
+      - certbot_www:/var/www/certbot:ro       # Let's Encrypt 확인 파일(certbot이 올림) — nginx는 보여주기만
+    # 6시간마다 설정을 다시 읽음(nginx -s reload) — certbot이 인증서를 갱신해도 nginx는 시작할 때 읽은 옛 인증서를 계속 쓰기 때문.
+    # 다시 읽기는 접속을 끊지 않음. $${!}의 $$는 compose 변수치환이 아니라 컨테이너 셸의 $ 라는 뜻.
+    command: /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g "daemon off;"'
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # https 인증서 자동 갱신 담당 — Let's Encrypt 인증서는 90일짜리라, 12시간마다 "만료 30일 안쪽이면 갱신"을 확인함(배포 0-2).
+  # 첫 발급은 이 컨테이너가 아니라 deploy/init-https.sh가 `docker compose run`으로 같은 이미지를 한 번 실행해서 함.
+  certbot:
+    image: certbot/certbot:v2.11.0   # 버전 고정(nginx와 같은 이유)
+    container_name: rag_certbot
+    profiles: ["deploy"]
+    volumes:
+      - certbot_conf:/etc/letsencrypt         # 인증서·갱신 설정 저장(쓰기)
+      - certbot_www:/var/www/certbot          # 확인 파일을 올리는 곳(쓰기) — nginx가 80번에서 보여줌
+    # 갱신 반복: 받은 인증서가 없으면 아무것도 안 하고 넘어감. TERM 신호(docker compose stop)를 받으면 바로 끝남.
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+    restart: unless-stopped
+
 volumes:
   pgdata:
   hf_cache:
+  certbot_conf:   # https 인증서 — 컨테이너를 다시 만들어도 남아야 함(지우면 다시 발급해야 하고, 너무 자주 받으면 Let's Encrypt가 막음)
+  certbot_www:    # Let's Encrypt 확인 파일 임시 보관
