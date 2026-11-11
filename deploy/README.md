@@ -113,7 +113,8 @@ curl -s -o /dev/null -w '%{http_code}
 - 인증서는 90일짜리지만 certbot 컨테이너가 자동 갱신(하루 두 번 확인), nginx는 6시간마다 새 인증서를 다시 읽음.
 
 ## 7. 관리자 영역을 학교 IP만으로
-대시보드(`/`)·`/admin/`·`/docs`·위젯 시험 페이지(`/widget-test/`)는 허용한 IP에서만(위젯 파일 `/widget.js`·질문 `/api/`는 누구나).
+대시보드(`/`)·`/admin/`·`/docs`는 허용한 IP에서만(위젯 파일 `/widget.js`·질문 `/api/`·위젯 시험 페이지 `/widget-test/`는 누구나).
+- 시험 페이지는 홈페이지 연결 전까지 학과 PC 밖에서 위젯을 확인할 유일한 곳이라 열어 둠. 정식 오픈 때 막으려면 nginx 설정 2개에서 `location /widget-test/` 블록을 지우고 `./deploy/deploy.sh`.
 1. **허용할 학교 PC**에서 표시를 붙여 접속(막혀서 403이 나도 IP는 기록에 남음):
    ```bash
    curl -s -o /dev/null -A "my-pc-check" https://aihub.yju.ac.kr/     # 또는 브라우저로 https://aihub.yju.ac.kr/ 접속
@@ -139,10 +140,9 @@ curl -s -o /dev/null -w '%{http_code}
 |---|---|
 | `https://aihub.yju.ac.kr/widget.js` | 위젯 코드 글자가 보임(열림 — 홈페이지가 불러가는 파일) |
 | `https://aihub.yju.ac.kr/` (대시보드) | **403** (학교 밖이라 막힘) |
-| `https://aihub.yju.ac.kr/widget-test/` (시험 페이지) | **403** (허용 IP 전용) |
+| `https://aihub.yju.ac.kr/widget-test/` (시험 페이지) → 위젯에서 질문 | 답이 옴 (홈페이지 연결 전까지 공개) |
 | `http://aihub.yju.ac.kr/widget.js` | `https://`로 자동 이동 |
 | 허용한 학교 PC에서 `https://aihub.yju.ac.kr/` | 대시보드 로그인 화면 → 로그인 |
-| 허용한 학교 PC에서 `https://aihub.yju.ac.kr/widget-test/` → 위젯에서 질문 | 답이 옴 |
 - 아이폰 사파리는 정상 https에 자물쇠를 따로 안 보여줌 — "안전하지 않음" 경고가 없으면 정상.
 - **시험 질문도 실제 질문처럼 DB에 저장됨** → 정식 오픈 전에 지움:
   ```bash
