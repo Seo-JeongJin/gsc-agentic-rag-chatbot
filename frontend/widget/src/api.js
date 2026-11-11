@@ -1,12 +1,15 @@
 /**
  * 백엔드(FastAPI) 호출 — /api/ask, /api/reset_conversation, /api/rate.
  *
- * API_BASE: 운영 환경에서는 학과 서버의 실제 FastAPI 주소로 바뀜. 지금은 로컬 테스트용으로
- * window.GSC_CHAT_API_BASE를 먼저 보고, 없으면 localhost:8080(로컬 docker compose 기본값)을 씀
- * — 테스트 페이지(test.html)에서 이 값을 지정해서 쓴다.
+ * API_BASE: 질문을 보낼 챗봇 서버 주소 — window.GSC_CHAT_API_BASE가 있으면 그 값, 없으면 이 위젯 파일을 불러온 주소
+ * (예: https://aihub.yju.ac.kr/widget.js → https://aihub.yju.ac.kr), 그것도 없으면 localhost:8080. 정하는 규칙은 apiBase.js(배포 0-7).
  */
 
-const API_BASE = window.GSC_CHAT_API_BASE || "http://localhost:8080";
+import { resolveApiBase } from "./apiBase.js";
+
+// document.currentScript = 지금 실행 중인 <script> 태그(= 이 위젯 파일). 파일을 처음 읽는 순간에만 값이 있어서,
+// 나중(질문할 때)이 아니라 여기 맨 위에서 한 번 읽어 둠.
+const API_BASE = resolveApiBase(window.GSC_CHAT_API_BASE, document.currentScript && document.currentScript.src);
 
 export async function askQuestion(questionText, sessionId) {
   const res = await fetch(`${API_BASE}/api/ask`, {

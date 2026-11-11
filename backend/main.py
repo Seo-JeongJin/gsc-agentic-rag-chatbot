@@ -10,9 +10,9 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -323,6 +323,25 @@ def mount_widget_test(target_app: FastAPI, directory: Path = WIDGET_TEST_DIR) ->
     @target_app.get("/widget-test", include_in_schema=False)
     async def widget_test_redirect() -> RedirectResponse:
         return RedirectResponse(url="/widget-test/")
+
+    # 운영용 위젯 주소 /widget.js (2026-11-11 배포 0-7) — 학과 홈페이지에 <script src="https://aihub.yju.ac.kr/widget.js"> 한 줄로 넣음.
+    # 전엔 시험 페이지 폴더(/widget-test/widget.js)뿐이라 "test"가 들어간 주소를 운영에 써야 했음. 같은 파일을 깔끔한 주소로도 내려줌.
+    # Cache-Control: no-cache = "쓰기 전에 바뀌었는지 매번 확인" — 위젯을 다시 배포해도 지원자 브라우저가 옛 파일을 계속 쓰지 않게.
+    # 안 바뀌었으면 304("갖고 있는 것 그대로 써")만 보냄 — 홈페이지 페이지를 옮길 때마다 확인하므로 매번 16KB를 다시 받지 않게.
+    # (FileResponse 자체는 ETag를 붙이기만 하고 비교는 안 해서, 브라우저가 보낸 If-None-Match와 직접 비교함)
+    # nginx에서도 공개 경로로 열어둬야 함(deploy/nginx — 안 그러면 관리자 영역 IP 제한에 걸려 외부에서 403).
+    @target_app.get("/widget.js", include_in_schema=False)
+    async def widget_bundle(request: Request) -> Response:
+        path = directory / "widget.js"
+        if not path.is_file():
+            raise HTTPException(status_code=404)
+        # stat_result를 넘기면 ETag·Last-Modified가 만들 때 바로 계산돼서 아래에서 비교할 수 있음
+        response = FileResponse(path, media_type="application/javascript",
+                                headers={"Cache-Control": "no-cache"}, stat_result=path.stat())
+        etag = response.headers.get("etag")
+        if etag and request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+        return response
 
     target_app.mount("/widget-test", StaticFiles(directory=directory, html=True), name="widget_test")
     return True
