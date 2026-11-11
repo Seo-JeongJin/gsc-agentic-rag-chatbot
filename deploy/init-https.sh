@@ -41,6 +41,10 @@ if [ -z "$MODE" ] && [ -n "$EXISTING_SERVER" ] && ! echo "$EXISTING_SERVER" | gr
   exit 1
 fi
 
+# 관리자 영역 허용 IP 파일(git 제외, 배포 0-8)이 없으면 견본(모두 허용)에서 만듦 — 없는 채로 nginx를 띄우면
+# Docker가 같은 이름의 빈 폴더를 만들어 nginx가 못 켜짐. 학교 IP는 https까지 끝낸 뒤 채움(deploy/README.md)
+[ -f deploy/nginx/admin-allow.conf ] || cp deploy/nginx/admin-allow.conf.example deploy/nginx/admin-allow.conf
+
 # ③ nginx를 http 설정으로 켬(이미 떠 있으면 그대로) — Let's Encrypt 확인 파일을 80번에서 보여줄 수 있게
 echo "[1/3] nginx(http) 실행"
 dc up -d nginx
