@@ -49,6 +49,14 @@ CHANGED="$(git diff --name-only "$BEFORE" "$AFTER")"
 
 echo "[3/5] 다시 빌드·교체 (바뀐 것만 새로 만듦, 몇 분 걸릴 수 있음)"
 dc up -d --build
+# nginx 설정이 바뀌었으면 nginx를 새로 만듦(2026-11-11 첫 업데이트에서 발견).
+# 왜: nginx는 설정 파일을 컨테이너 밖에서 "파일 하나"로 연결(bind mount)해 쓰는데, git pull은 파일을 그 자리에서 고치지 않고
+#     새 파일로 바꿔치기함 → 컨테이너는 바꿔치기 전 옛 파일을 계속 봄. compose 설정이 그대로면 위의 up이 nginx를 다시 만들지 않아서
+#     옛 설정이 조용히 남았음(시험 페이지를 막는 설정이 반영 안 됨 → 휴대폰에서 그대로 열림). 다시 만들면 새 파일로 연결됨(1~2초, 다른 컨테이너 영향 없음).
+if echo "$CHANGED" | grep -q '^deploy/nginx/'; then
+  echo "  nginx 설정이 바뀜 → nginx를 새로 만들어 새 설정 연결"
+  dc up -d --force-recreate --no-deps nginx
+fi
 
 echo "[4/5] 자동 확인"
 # 챗봇이 뜰 때까지 최대 90초 기다림(MCP 서버 연결 등으로 몇 초 걸림)
@@ -60,6 +68,20 @@ for svc in db mcp_server backend nginx certbot; do
   if dc ps --status running --services 2>/dev/null | grep -qx "$svc"; then ok "$svc 실행 중"; else fail "$svc 안 떠 있음 — docker compose --profile deploy logs $svc"; fi
 done
 if dc exec -T nginx nginx -t >/dev/null 2>&1; then ok "nginx 설정 문법"; else fail "nginx 설정 오류 — docker compose --profile deploy exec nginx nginx -t"; fi
+# nginx가 "실제로 쓰고 있는" 설정이 서버의 파일과 글자 하나까지 같은지 — 위 문법 검사는 컨테이너 안의 설정을 검사하므로
+# 옛 설정이 남아 있어도 통과해 버림(11-11 첫 업데이트). 사용 중인 설정은 .env의 NGINX_CONF(없으면 http 설정).
+# 허용 IP 파일도 비교 — 편집기에 따라 저장할 때 바꿔치기해서 nginx -s reload만으론 반영 안 될 수 있음.
+ACTIVE_CONF="$(grep -E '^NGINX_CONF=' .env | tail -1 | cut -d= -f2)"
+ACTIVE_CONF="${ACTIVE_CONF:-nginx.http.conf}"
+for pair in "deploy/nginx/$ACTIVE_CONF:/etc/nginx/conf.d/default.conf:설정($ACTIVE_CONF)" \
+            "deploy/nginx/admin-allow.conf:/etc/nginx/admin-allow.conf:허용 IP 목록"; do
+  IFS=: read -r host_file container_file label <<< "$pair"
+  if dc exec -T nginx cat "$container_file" 2>/dev/null | cmp -s - "$host_file"; then
+    ok "nginx가 최신 $label 사용 중"
+  else
+    fail "nginx가 쓰는 $label 이 서버 파일과 다름 — docker compose --profile deploy up -d --force-recreate nginx"
+  fi
+done
 if curl -fsS -o /dev/null http://127.0.0.1:8080/widget.js; then ok "위젯 파일(/widget.js)"; else fail "위젯 파일이 안 나옴 — docker compose --profile deploy logs backend"; fi
 # vLLM 접속 확인 — 컨테이너 안에서 .env에 적힌 주소로 모델 목록만 요청(질문은 안 보냄). mock 모드면 건너뜀
 VLLM_CHECK='import os, sys, urllib.request
