@@ -7,6 +7,7 @@ pytest는 tests/ 폴더의 conftest.py를 자동으로 읽어서, 여기 정의�
 
 import pytest
 
+import admin_api
 import guardrail
 
 
@@ -25,6 +26,8 @@ def reset_guardrail_state():
     /api/ask를 호출하는 통합 테스트도 가드레일을 거치므로 전체 테스트 공통으로 둠(autouse)."""
     guardrail._request_timestamps.clear()
     guardrail._last_question.clear()
+    admin_api._login_failures.clear()   # 관리자 로그인 실패 기록(배포 0-6)도 같은 이유로 — 앞 테스트의 실패가 뒤 테스트를 잠그지 않게
     yield
     guardrail._request_timestamps.clear()
     guardrail._last_question.clear()
+    admin_api._login_failures.clear()

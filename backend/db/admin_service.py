@@ -55,6 +55,9 @@ async def login(username: str, password: str) -> str | None:
         token = secrets.token_urlsafe(32)  # 추측 불가능한 랜덤 토큰 — 쿠키로 브라우저에 전달됨
         expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_DURATION_HOURS)
 
+        # 만료된 로그인 기록 정리(2026-11-11 배포 0-6, 리뷰 L5) — 만료돼도 행이 지워지지 않아 계속 쌓였음.
+        # 관리자 로그인은 드물어서 로그인할 때마다 한 번 지우면 충분(별도 정리 작업을 따로 돌릴 필요 없음).
+        await conn.execute("DELETE FROM admin_sessions WHERE expires_at < now()")
         await conn.execute(
             "INSERT INTO admin_sessions (session_token, admin_id, expires_at) VALUES ($1, $2, $3)",
             token,

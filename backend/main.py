@@ -59,12 +59,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# 위젯은 학과 홈페이지(다른 출처)에 삽입되는 코드라, 거기서 보내는 요청을 브라우저가
-# 막지 않도록 CORS 허용이 필요함. 로컬 테스트 단계라 전체 허용 — 실제 배포 시
-# allow_origins를 학과 홈페이지 실제 도메인으로 좁혀야 함(지금은 미확정이라 전체 허용).
+def cors_allow_origins() -> list[str]:
+    """위젯 요청을 허용할 사이트 목록 — .env의 CORS_ALLOW_ORIGINS(쉼표로 여러 개). 없으면 전체 허용(["*"]).
+
+    위젯은 학과 홈페이지(다른 출처)에 삽입되는 코드라, 거기서 보내는 요청을 브라우저가 막지 않도록 CORS 허용이 필요함.
+    전엔 전체 허용(*)으로 고정이라 다른 사이트가 자기 페이지에 우리 챗봇을 붙여 GPU를 쓸 수 있었음 → 배포 서버 .env에
+    학과 홈페이지(https://gsc.yju.ac.kr)만 적음(2026-11-11 배포 0-6). 값이 없으면 전체 허용인 이유: 학과 PC 실측·집 개발에서
+    위젯 시험 페이지가 지금처럼 동작하게. (aihub.yju.ac.kr 자신의 위젯 시험 페이지·대시보드는 같은 출처라 CORS와 무관)
+    CORS는 브라우저만 지키는 규칙이라 프로그램으로 직접 부르는 건 못 막음 — 그건 요청 횟수 제한(입력 가드레일·리뷰 8)의 몫."""
+    raw = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_allow_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )

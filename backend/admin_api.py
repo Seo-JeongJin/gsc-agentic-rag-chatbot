@@ -6,7 +6,9 @@ main.py에 직접 다 적지 않고 별도 파일로 분리한 이유: main.py�
 역할 구분이 흐려짐. FastAPI의 APIRouter로 만들어서 main.py가 한 줄로 등록(include_router)만 하면 됨.
 """
 
-from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Response
+import time
+
+from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from db.admin_service import login as admin_login
@@ -30,6 +32,32 @@ router = APIRouter(prefix="/admin")
 
 ADMIN_COOKIE_NAME = "admin_session_token"
 
+# 로그인 시도 제한 (2026-11-11 배포 0-6, 리뷰 L5) — 전엔 무제한이라 비밀번호를 프로그램으로 계속 대입할 수 있었음.
+# 같은 IP에서 LOGIN_FAIL_WINDOW_SECONDS 안에 LOGIN_FAIL_LIMIT번 틀리면, 그중 가장 오래된 실패가 창 밖으로 나갈 때까지 429.
+# 계정이 아니라 IP 기준인 이유: 계정 기준으로 잠그면 공격자가 일부러 틀려서 진짜 관리자까지 못 들어오게 만들 수 있음.
+# 메모리(dict)에만 둠 — 서버가 재시작되면 초기화되지만, 관리자 로그인은 드물어서 DB에 남길 만큼 중요하지 않음.
+LOGIN_FAIL_LIMIT = 5
+LOGIN_FAIL_WINDOW_SECONDS = 15 * 60
+_login_failures: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    """요청한 사람의 실제 IP. nginx 뒤에선 연결 상대가 항상 nginx라서, nginx가 넣어주는 X-Real-IP를 씀(deploy/nginx 설정).
+    이 헤더는 요청자가 꾸며낼 수도 있지만, 8080은 127.0.0.1에만 열려 있어(배포 0-3) nginx를 거치지 않고는 닿을 수 없고
+    nginx는 이 값을 항상 실제 IP로 덮어씀. 헤더가 없으면(학과 PC에서 8080 직접 접속) 연결 상대 주소."""
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+
+
+def _recent_failures(ip: str) -> list[float]:
+    """이 IP의 최근(창 안) 실패 시각 목록. 창 밖으로 나간 기록은 지우고, 비면 키 자체를 지워 메모리가 계속 늘지 않게(리뷰 8과 같은 문제)."""
+    now = time.time()
+    recent = [t for t in _login_failures.get(ip, []) if now - t < LOGIN_FAIL_WINDOW_SECONDS]
+    if recent:
+        _login_failures[ip] = recent
+    else:
+        _login_failures.pop(ip, None)
+    return recent
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -50,18 +78,30 @@ async def require_admin(admin_session_token: str | None = Cookie(default=None)) 
 
 
 @router.post("/login")
-async def login_endpoint(payload: LoginRequest, response: Response) -> dict:
+async def login_endpoint(payload: LoginRequest, request: Request, response: Response) -> dict:
     """아이디/비밀번호 확인 후, 성공하면 세션 토큰을 쿠키로 내려줌(HttpOnly — JS에서 못 읽게).
-    실패하면 401 — 아이디가 없는 경우와 비밀번호가 틀린 경우를 구분하지 않음(정보 유출 방지)."""
+    실패하면 401 — 아이디가 없는 경우와 비밀번호가 틀린 경우를 구분하지 않음(정보 유출 방지).
+    같은 IP에서 최근 실패가 LOGIN_FAIL_LIMIT번이면 비밀번호를 확인하지도 않고 429(배포 0-6) — 맞는 비밀번호여도 잠긴 동안은 거부."""
+    ip = _client_ip(request)
+    if len(_recent_failures(ip)) >= LOGIN_FAIL_LIMIT:
+        raise HTTPException(status_code=429, detail="로그인 시도가 너무 많습니다. 15분 뒤에 다시 시도해 주세요.")
+
     token = await admin_login(payload.username, payload.password)
     if token is None:
+        _login_failures.setdefault(ip, []).append(time.time())
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
+    _login_failures.pop(ip, None)   # 성공하면 실패 기록을 지움 — 오타 몇 번 뒤 로그인한 관리자가 다음에 금방 잠기지 않게
 
+    # https로 들어온 요청이면 secure 쿠키(배포 0-6) — 브라우저가 https에서만 이 쿠키를 보내서, http로 새지 않음.
+    # nginx 뒤에선 챗봇이 받는 연결 자체는 http라 nginx가 넘겨주는 X-Forwarded-Proto로 판단.
+    # http(학과 PC 개발·실측)에선 끔 — 켜면 브라우저가 http에서 쿠키를 안 보내 로그인이 안 됨.
+    secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
     response.set_cookie(
         key=ADMIN_COOKIE_NAME,
         value=token,
         httponly=True,  # 자바스크립트가 document.cookie로 이 값을 읽지 못하게 — XSS로 토큰 탈취 방지
         samesite="lax",
+        secure=secure,
         max_age=24 * 60 * 60,
     )
     return {"status": "ok"}
