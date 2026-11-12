@@ -62,3 +62,11 @@ def test_ineffective_rule_15_1_is_removed_from_main_prompt():
     """[B9 1차 시도] 기본 프롬프트에 넣었던 15-1번은 실측에서 효과가 없었음(9/9 여전히 판정) — 개인 자격 질문은 이제
     전용 프롬프트로 가므로 기본 프롬프트에서 뺌(남기면 프롬프트만 길어짐)."""
     assert "15-1." not in SYSTEM_PROMPT
+
+
+def test_eligibility_prompt_does_not_name_interview_track():
+    """[2026-11-12 배포 후 재현] 3번 규칙에 "면접전형"이 박혀 있어서 개인 자격 답이 매번 "면접전형으로도 지원할 수 있습니다"라고 함
+    (대학자체전형 질문 10/10) — 수시 2차엔 글로벌시스템융합과 면접전형 모집이 없음(요강 10쪽). 모집 여부는 차수마다 바뀌니
+    프롬프트에 전형 이름을 박지 말고 문서(검색 결과)를 따르게 함. 단어만 뺀 실험: 5개 질문 모두 0/10, 판정·괄호 범위는 그대로."""
+    assert "면접전형" not in ELIGIBILITY_PROMPT
+    assert "다른 전형(일반고전형·특성화고전형 등)" in ELIGIBILITY_PROMPT
