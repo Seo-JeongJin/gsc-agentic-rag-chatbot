@@ -16,6 +16,7 @@ import re
 
 import llm_client
 import mcp_client
+from syllable_check import odd_syllables
 from system_prompt import ESCALATION_CONTACT_MESSAGE, FOLLOW_UP_SEARCH_REMINDER, KOREAN_REWRITE_REQUEST, SYSTEM_PROMPT
 
 logger = logging.getLogger("uvicorn.error")
@@ -231,6 +232,31 @@ async def _rewrite_if_chinese(messages: list[dict], answer: str, allowed_text: s
     return rewritten
 
 
+async def _regenerate_if_odd(messages: list[dict], tools: list[dict] | None, thinking: bool, answer: str) -> str:
+    """최종 답에 바뀐 글자(예: "졸업"→"졡업")가 있으면 **같은 요청을 그대로** 딱 한 번 다시 보내 새 답을 받음 (2026-11-12 배포 후 B25).
+
+    왜 생기나: Qwen3는 " 졸"을 바이트 조각 3개로 쓰는데 마지막 조각을 잘못 고르면 다른 글자가 됨(syllable_check.py 참고). 우연한 실수라
+    같은 요청을 다시 보내면 거의 정상으로 나옴(실험 15/15). 고쳐 쓰라고 하면 못 고침(0/20, 모델 눈에 졡·졸이 비슷해서) → 중국어 다시 쓰기(B14)와 달리
+    "무엇이 틀렸는지"를 알려주지 않음. 감지·횟수 제한·실패 처리는 코드.
+    한 번만 하는 이유는 B14와 같음(다시 만들어도 남으면 다시 만든 답을 쓰고 로그만 — 그래도 숏텀 메모리에선 빠짐, memory_service 참고).
+    다시 만든 응답이 실패·빈 답이거나 답 대신 검색을 요청하면 첫 답을 씀(답은 이미 있으니 루프를 다시 돌지 않음).
+    정상 답이 잘못 걸리는 경우(약 1.6%)는 같은 요청을 한 번 더 보낼 뿐이라 2~3초 늦어지는 것 말고 손해가 없음."""
+    odd = odd_syllables(answer)
+    if not odd:
+        return answer
+    try:
+        response = await generate_llm_response(messages, tools, thinking)
+    except llm_client.LLMError as e:
+        logger.warning("바뀐 글자 %s가 있는 답 다시 만들기 실패 — 원래 답 사용: %s", odd, e)
+        return answer
+    regenerated = (response.get("content") or "").strip()
+    if response.get("tool_calls") or not regenerated:
+        logger.info("바뀐 글자 %s가 있는 답 다시 만들었지만 답이 아님 — 원래 답 사용", odd)
+        return answer
+    logger.info("바뀐 글자가 있는 답 다시 만듦 — %s → 다시 만든 뒤 %s", odd, odd_syllables(regenerated) or "없음")
+    return regenerated
+
+
 def _escalation(tool_call_count: int, grounding_parts: list[str]) -> dict:
     """답변을 못 만든 경우의 반환값 — 연락처 안내 고정 문구 + 관리자 검토 필요(insufficient_info).
     이 문구는 LLM이 아니라 코드가 그대로 반환하는 고정 텍스트라, system_prompt.py의 [문의 안내] 지침과 별개로
@@ -297,6 +323,8 @@ async def run_agent_loop(
                 # 도구도 안 부르고 답도 비어 있음 — 빈 말풍선을 내보내지 않고 연락처 안내로(리뷰 3번)
                 logger.warning("LLM이 빈 답변을 반환함 — 에스컬레이션 처리")
                 return {**_escalation(tool_call_count, grounding_parts), "history_used": history_used}
+            # 바뀐 글자 → 같은 요청으로 다시 만들기(B25)를 중국어 다시 쓰기(B14)보다 먼저: 다시 만든 답에 중국어가 섞여도 아래에서 잡히게
+            answer = await _regenerate_if_odd(messages, tools, thinking, answer)
             answer = await _rewrite_if_chinese(messages, answer, question_text + "\n" + "\n".join(grounding_parts))
             return {
                 "answer_text": answer,

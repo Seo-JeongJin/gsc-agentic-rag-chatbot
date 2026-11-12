@@ -468,3 +468,48 @@ async def test_rewrite_is_tried_only_once(fake_mcp, monkeypatch):
 
     assert result["answer_text"] == "不客气해요!"
     assert len(seen) == 2
+
+
+# ----- 2026-11-12 배포 후 B25: 답에 바뀐 글자("졸업"→"졡업")가 있으면 같은 요청으로 한 번 다시 만듦 -----
+
+
+async def test_answer_with_odd_syllable_is_regenerated_once(fake_mcp, monkeypatch):
+    """[B25 재현] Qwen3가 바이트 조각을 잘못 골라 "졸업"을 "졡업"으로 냄. 고쳐 쓰라고 하면 못 고침(0/20)이라,
+    "틀렸다"는 말 없이 **같은 요청을 그대로** 한 번 더 보냄 → 실험 15/15 정상. 다시 보낸 요청이 첫 요청과 똑같아야 함."""
+    seen = _scripted_llm(monkeypatch, [
+        {"role": "assistant", "content": "고등학교를 졡업했거나 다른 대학을 졸업한 경우에도 지원할 수 있어요.", "tool_calls": None},
+        {"role": "assistant", "content": "고등학교를 졸업했거나 다른 대학을 졸업한 경우에도 지원할 수 있어요.", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("고3이 아니어도 지원할 수 있어?", history=[])
+
+    assert result["answer_text"] == "고등학교를 졸업했거나 다른 대학을 졸업한 경우에도 지원할 수 있어요."
+    assert len(seen) == 2
+    assert seen[1] == seen[0]   # 잘못된 답을 보여주거나 "고쳐 써"를 덧붙이지 않은, 똑같은 요청
+
+
+async def test_regeneration_is_tried_only_once(fake_mcp, monkeypatch):
+    """다시 만들어도 이상한 글자가 남으면 더 반복하지 않고 다시 만든 답을 씀(호출이 끝없이 늘지 않게)."""
+    seen = _scripted_llm(monkeypatch, [
+        {"role": "assistant", "content": "졡업생도 지원할 수 있어요.", "tool_calls": None},
+        {"role": "assistant", "content": "졡업생도 지원할 수 있어요!", "tool_calls": None},
+    ])
+
+    result = await agent_loop.run_agent_loop("졸업생도 돼?", history=[])
+
+    assert result["answer_text"] == "졡업생도 지원할 수 있어요!"
+    assert len(seen) == 2
+
+
+async def test_regeneration_that_asks_for_a_tool_keeps_the_first_answer(fake_mcp, monkeypatch):
+    """다시 만든 응답이 답이 아니라 검색 요청이거나 비어 있으면, 그 요청을 실행하지 않고 첫 답을 씀(답은 이미 있으니 루프를 다시 돌지 않음)."""
+    seen = _scripted_llm(monkeypatch, [
+        {"role": "assistant", "content": "졡업생도 지원할 수 있어요.", "tool_calls": None},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "search_documents", "arguments": "{\"query\": \"졸업생\"}"}}]},
+    ])
+
+    result = await agent_loop.run_agent_loop("졸업생도 돼?", history=[])
+
+    assert result["answer_text"] == "졡업생도 지원할 수 있어요."
+    assert len(seen) == 2 and fake_mcp == []   # 검색은 실행 안 됨

@@ -548,3 +548,18 @@ async def test_short_term_memory_skips_unanswered_and_failed_replies(client, db,
     history = await fetch_recent_history("s1")
 
     assert [m["content"] for m in history if m["role"] == "user"] == ["입학 정원 알려주세요", "면접은 언제예요?"]
+
+
+async def test_short_term_memory_skips_replies_with_odd_syllables(client, db, monkeypatch):
+    """[2026-11-12 배포 후 버그 재현, B25] 모델이 글자를 조각(바이트)으로 쓰다가 마지막 조각을 잘못 골라 "졸업"이 "졡업"이 된 답이
+    한 번 나가면, 다음 질문 때 그 답이 이전 대화로 같이 가서 모델이 "졡업"을 계속 따라 씀(학과 PC 실험 10/10, 새 대화면 0/10).
+    그래서 우리 문서·과거 답에 한 번도 안 나온 한글이 든 답은 숏텀 메모리에서 뺌. 정상 답은 그대로 남아야 함."""
+    _fake_review(monkeypatch, '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}')
+    first = await _ask(client, "고3이 아니어도 지원할 수 있어?")
+    await _ask(client, "입학 정원 알려주세요")
+    await db.execute("UPDATE questions SET answer_text = $1 WHERE id = $2",
+                     "네, 고등학교를 졡업했거나 다른 대학을 졸업한 경우에도 지원할 수 있어요.", first["question_id"])
+
+    history = await fetch_recent_history("s1")
+
+    assert [m["content"] for m in history if m["role"] == "user"] == ["입학 정원 알려주세요"]

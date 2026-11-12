@@ -10,7 +10,12 @@
 (2) 사용자가 "새 대화 시작"을 누르면(conversation_reset_at 갱신) 그 시점 이전 대화도 전부 제외.
 """
 
+import logging
+
 from db.connection import get_pool
+from syllable_check import odd_syllables
+
+logger = logging.getLogger("uvicorn.error")
 
 DEFAULT_HISTORY_LIMIT = 5         # 최근 몇 개의 질문/답변 쌍까지 가져올지
 MEMORY_RETENTION_HOURS = 24       # 이 시간이 지난 대화는 더 이상 맥락으로 안 가져옴
@@ -55,6 +60,11 @@ async def fetch_recent_history(session_id: str, limit: int = DEFAULT_HISTORY_LIM
 
     messages: list[dict] = []
     for row in rows:
+        # (2026-11-12 B25) 글자가 바뀐 답("졸업"→"졡업")은 뺌 — 남겨 두면 모델이 다음 답부터 그 글자를 계속 따라 씀.
+        # SQL이 아니라 여기서 거르는 이유: "목록에 없는 글자" 검사는 DB가 못 함. 그래서 LIMIT 개수보다 적게 남을 수 있음(드물어서 괜찮음).
+        if odd := odd_syllables(row["answer_text"]):
+            logger.info("숏텀 메모리에서 뺌 — 답에 목록에 없는 글자 %s (B25)", odd)
+            continue
         messages.append({"role": "user", "content": row["question_text"]})
         messages.append({"role": "assistant", "content": row["answer_text"]})
 
