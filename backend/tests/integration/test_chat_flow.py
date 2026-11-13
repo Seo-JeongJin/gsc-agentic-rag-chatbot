@@ -531,29 +531,34 @@ async def test_broken_review_keeps_answer_and_records_null(client, db, monkeypat
     assert (row["guardrail_passed"], row["needs_review"], row["no_emb"]) == (None, False, True)
 
 
-async def test_short_term_memory_skips_unanswered_and_failed_replies(client, db, monkeypatch):
+async def test_short_term_memory_drops_only_the_answer_of_unanswered_and_failed_replies(client, db, monkeypatch):
     """[2026-10-29 실측 버그 재현] 같은 세션에 "모른다" 답이 쌓이면 다음 질문에서 모델이 이전 대화를 따라 검색을 건너뜀
     (입학 정원도 "확정적으로 답변드리기 어렵습니다" — 새 세션에선 3/3 정상). 그래서 숏텀 메모리(다음 질문 때 LLM에 같이
     보내는 이전 대화)에서 "답을 못 준 답변"(needs_review)과 "검토 실패 답변"(guardrail_passed=FALSE)은 뺌.
-    검토가 안 된 답변(NULL)은 남김 — 판정이 없을 뿐 나쁜 답이라는 근거가 없어서."""
+    검토가 안 된 답변(NULL)은 남김 — 판정이 없을 뿐 나쁜 답이라는 근거가 없어서.
+    [2026-11-13 B26] 단, 빼는 건 "답"만 — 질문까지 빼면 "총 몇 명이 달성했나요?"처럼 그 질문에 이어 묻는 말의 맥락이 사라짐
+    (세션 재생 실험: 질문까지 뺌 0/10 → 질문은 남김 10/10)."""
     _fake_review(monkeypatch, '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}')
-    await _ask(client, "입학 정원 알려주세요")                  # 정상 → 남음
+    await _ask(client, "입학 정원 알려주세요")                  # 정상 → 질문·답 남음
     _fake_review(monkeypatch, '{"verdict": "pass", "info_question": true, "answered": false, "reason": ""}')
-    await _ask(client, "기숙사 신청은 어떻게 하나요?")          # 답 못 줌 → 빠짐
+    await _ask(client, "기숙사 신청은 어떻게 하나요?")          # 답 못 줌 → 질문만 남음
     _fake_review(monkeypatch, '{"verdict": "fail", "info_question": true, "answered": true, "reason": "근거 없음"}')
-    await _ask(client, "장학금 얼마예요?")                      # 검토 실패 → 빠짐
+    await _ask(client, "장학금 얼마예요?")                      # 검토 실패 → 질문만 남음
     _fake_review(monkeypatch, "깨진 응답")
-    await _ask(client, "면접은 언제예요?")                      # 판정 없음 → 남음
+    await _ask(client, "면접은 언제예요?")                      # 판정 없음 → 질문·답 남음
 
     history = await fetch_recent_history("s1")
 
-    assert [m["content"] for m in history if m["role"] == "user"] == ["입학 정원 알려주세요", "면접은 언제예요?"]
+    assert [m["role"] for m in history] == ["user", "assistant", "user", "user", "user", "assistant"]
+    assert [m["content"] for m in history if m["role"] == "user"] == [
+        "입학 정원 알려주세요", "기숙사 신청은 어떻게 하나요?", "장학금 얼마예요?", "면접은 언제예요?"]
 
 
-async def test_short_term_memory_skips_replies_with_odd_syllables(client, db, monkeypatch):
+async def test_short_term_memory_drops_the_answer_with_odd_syllables(client, db, monkeypatch):
     """[2026-11-12 배포 후 버그 재현, B25] 모델이 글자를 조각(바이트)으로 쓰다가 마지막 조각을 잘못 골라 "졸업"이 "졡업"이 된 답이
     한 번 나가면, 다음 질문 때 그 답이 이전 대화로 같이 가서 모델이 "졡업"을 계속 따라 씀(학과 PC 실험 10/10, 새 대화면 0/10).
-    그래서 우리 문서·과거 답에 한 번도 안 나온 한글이 든 답은 숏텀 메모리에서 뺌. 정상 답은 그대로 남아야 함."""
+    그래서 우리 문서·과거 답에 한 번도 안 나온 한글이 든 답은 숏텀 메모리에서 뺌. 정상 답은 그대로 남아야 함.
+    (2026-11-13 B26) 질문은 남김 — 이어지는 말의 맥락은 질문이 갖고 있음."""
     _fake_review(monkeypatch, '{"verdict": "pass", "info_question": true, "answered": true, "reason": ""}')
     first = await _ask(client, "고3이 아니어도 지원할 수 있어?")
     await _ask(client, "입학 정원 알려주세요")
@@ -562,4 +567,47 @@ async def test_short_term_memory_skips_replies_with_odd_syllables(client, db, mo
 
     history = await fetch_recent_history("s1")
 
-    assert [m["content"] for m in history if m["role"] == "user"] == ["입학 정원 알려주세요"]
+    assert [m["role"] for m in history] == ["user", "user", "assistant"]
+    assert history[0]["content"] == "고3이 아니어도 지원할 수 있어?"
+    assert all("졡" not in m["content"] for m in history)
+
+
+async def _insert_turns(db, n: int, session_id: str = "s1") -> None:
+    """질문 n개를 1초 간격(오래된 것 먼저)으로 직접 저장 — LLM을 n번 돌리지 않고 "긴 대화"를 만들기 위함."""
+    await db.execute("INSERT INTO sessions (session_id) VALUES ($1) ON CONFLICT DO NOTHING", session_id)
+    for i in range(n):
+        await db.execute(
+            "INSERT INTO questions (session_id, question_text, answer_text, created_at) "
+            "VALUES ($1, $2, $3, now() - make_interval(secs => $4))",
+            session_id, f"질문{i}", f"답변{i}", n - i)
+
+
+async def test_short_term_memory_lists_older_questions_before_recent_turns(db):
+    """[2026-11-13 배포 후 버그 재현, B26] 최근 5개만 넘겨서 "내가 처음 했던 질문은?"에 남은 것 중 가장 오래된 질문을 첫 질문이라고 답함
+    (실제 첫 질문은 그보다 앞 — 0/10). 최근 5개보다 앞 질문은 "앞서 받은 질문 목록" 한 메시지로 맨 앞에 넣음(재생 실험 10/10)."""
+    from db.memory_service import QUESTION_LIST_HEADER
+
+    await _insert_turns(db, 8)
+
+    history = await fetch_recent_history("s1")
+
+    assert history[0]["role"] == "user"
+    assert history[0]["content"].startswith(QUESTION_LIST_HEADER)
+    assert "1. 질문0\n2. 질문1\n3. 질문2" in history[0]["content"]
+    assert [m["content"] for m in history[1:]] == [x for i in range(3, 8) for x in (f"질문{i}", f"답변{i}")]
+
+
+async def test_short_term_memory_caps_the_question_list_and_says_how_many_were_left_out(db):
+    """[B26] 목록은 최대 20개·질문당 100자 — 길이(LLM이 한 번에 읽는 양)를 묶어 두기 위함. 넘친 앞 질문은 "N개 생략"으로 알림:
+    표시가 없으면 모델이 목록 맨 위를 "첫 질문"이라고 믿음(B26의 81번과 같은 실수)."""
+    from db.memory_service import MAX_LISTED_QUESTION_CHARS, MAX_LISTED_QUESTIONS
+
+    await _insert_turns(db, 5 + MAX_LISTED_QUESTIONS + 3)
+    await db.execute("UPDATE questions SET question_text = $1 WHERE question_text = '질문3'", "가" * 300)
+
+    listing = (await fetch_recent_history("s1"))[0]["content"]
+
+    assert "이전 질문 3개 생략" in listing
+    # 번호는 대화 전체에서의 실제 순서(4번부터) — "몇 번째 질문"을 물어도 맞게 답하도록
+    assert "1. 질문0" not in listing and "\n23. 질문22" in listing
+    assert "가" * MAX_LISTED_QUESTION_CHARS + "…" in listing and "가" * (MAX_LISTED_QUESTION_CHARS + 1) not in listing

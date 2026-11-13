@@ -26,6 +26,7 @@ import logging
 import re
 
 import llm_client
+from db.memory_service import QUESTION_LIST_HEADER
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -68,11 +69,19 @@ _PROMPT = """당신은 대학 입학 상담 챗봇의 "질문 분류기"입니�
 
 def _previous_turn(history: list[dict]) -> str:
     """숏텀 메모리(이전 대화)에서 바로 앞 1턴(사용자 질문 + 챗봇 답)만 꺼내 "사용자: …\n챗봇: …"로 만듦. 없으면 "(없음)".
-    1턴만 쓰는 이유: 실험이 1턴으로 98%를 냈고, "그럼 2차는요?"·"잘 모르는 거야?"는 바로 앞 말에 이어지는 말이라 그걸로 충분함."""
-    last_user = next((m["content"] for m in reversed(history) if m.get("role") == "user"), None)
-    last_answer = next((m["content"] for m in reversed(history) if m.get("role") == "assistant"), None)
-    if not last_user or not last_answer:
+    1턴만 쓰는 이유: 실험이 1턴으로 98%를 냈고, "그럼 2차는요?"·"잘 모르는 거야?"는 바로 앞 말에 이어지는 말이라 그걸로 충분함.
+    (2026-11-13 B26) 숏텀 메모리가 검토에 걸린 답을 빼고 질문만 남기므로, 마지막 질문의 "바로 뒤" 답만 그 질문의 답으로 봄
+    (전엔 마지막 질문·마지막 답을 따로 찾아서 다른 턴끼리 짝지어졌음). 답이 없으면 "(답 기록 없음)" — 질문만으로도 이어지는 말인지 알 수 있음.
+    맨 앞의 "앞서 받은 질문 목록" 메시지는 바로 앞 대화가 아니라서 건너뜀."""
+    turns = [m for m in history if not (m.get("content") or "").startswith(QUESTION_LIST_HEADER)]
+    last_index = next((i for i in range(len(turns) - 1, -1, -1) if turns[i].get("role") == "user"), None)
+    if last_index is None or not turns[last_index].get("content"):
         return "(없음)"
+    last_user = turns[last_index]["content"]
+    following = turns[last_index + 1] if last_index + 1 < len(turns) else None
+    last_answer = following["content"] if following and following.get("role") == "assistant" and following.get("content") else None
+    if last_answer is None:
+        return f"사용자: {last_user}\n챗봇: (답 기록 없음)"
     if len(last_answer) > MAX_PREV_ANSWER_CHARS:
         last_answer = last_answer[:MAX_PREV_ANSWER_CHARS] + "…"
     return f"사용자: {last_user}\n챗봇: {last_answer}"

@@ -27,6 +27,26 @@ def test_prompt_has_all_labels_and_the_latest_turn():
     assert "잘 모르는거야?" in prompt
 
 
+def test_prompt_pairs_the_latest_question_with_its_own_answer():
+    """[2026-11-13 B26 버그 재현] 숏텀 메모리가 검토에 걸린 답을 빼고 질문만 남기면, 전엔 "마지막 질문"과 "마지막 답"을 따로 찾아서
+    서로 다른 턴의 질문·답이 짝지어졌음. 그 세션에선 아예 질문까지 빠져서 "총 몇 명이 달성했나요?"를 범위 밖(OOS)으로 골랐음(7/10).
+    마지막 질문에 답이 없으면 답이 없다고 보여주고, 앞 질문 목록 메시지는 "바로 앞 대화"로 보지 않음."""
+    from db.memory_service import QUESTION_LIST_HEADER
+
+    history = [
+        {"role": "user", "content": QUESTION_LIST_HEADER + "\n1. 어떤 걸 주력으로 공부하나요"},
+        {"role": "user", "content": "문의하려면 어떻게 해야하나요"},
+        {"role": "assistant", "content": "인스타그램 DM이나 학과 사무실로 연락주세요."},
+        {"role": "user", "content": "1학년 때 JLPT N1~N2는 다 딴다고 했는데 실제로 다 그렇게 땄나요"},
+    ]
+
+    prompt = _build_prompt("총 몇 명이 달성했나요", history)
+
+    assert "사용자: 1학년 때 JLPT N1~N2는" in prompt
+    assert "인스타그램 DM" not in prompt
+    assert "챗봇: (답 기록 없음)" in prompt
+
+
 def test_prompt_without_history_says_none():
     """첫 질문이면 앞 대화 칸에 "(없음)" — 빈 칸이면 모델이 앞 대화가 잘린 걸로 오해할 수 있음."""
     assert "[바로 앞 대화]\n(없음)" in _build_prompt("안녕하세요", [])

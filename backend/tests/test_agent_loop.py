@@ -98,6 +98,32 @@ async def test_follow_up_question_gets_search_reminder(fake_mcp, monkeypatch):
     assert seen_last[0] == "입학 정원이 몇 명이에요?"
 
 
+async def test_question_right_after_an_unanswered_one_gets_extra_reminder(fake_mcp, monkeypatch):
+    """[2026-11-13 B26 버그 재현] 숏텀 메모리가 검토에 걸린 답을 빼고 질문만 남기면, 이전 대화가 "답 없는 질문"으로 끝남.
+    그 바로 뒤에 새 주제("기숙사 신청은 언제 해요?")를 물으면 모델이 질문 두 개를 하나로 보고 검색 없이 앞 답(원서접수 기간)을
+    가져다 씀(0/5). 이번 질문 뒤에 "바로 앞 질문엔 답을 못 했다 — 이어지는 말인지 새 질문인지 보고 검색" 알림을 붙이면
+    새 주제 2종 5/5·5/5, 답 없는 질문에 이어 묻는 말 3종 5/5·5/5·4/5. 앞 질문에 답이 있으면 안 붙임."""
+    from system_prompt import ANSWERLESS_PREVIOUS_REMINDER, FOLLOW_UP_SEARCH_REMINDER
+
+    seen_last = []
+    original = agent_loop.generate_llm_response
+
+    async def spy(messages, tools, thinking):
+        seen_last.append(messages[-1]["content"] if messages[-1]["role"] == "user" else None)
+        return await original(messages, tools, thinking)
+
+    monkeypatch.setattr(agent_loop, "generate_llm_response", spy)
+    answered = [{"role": "user", "content": "입학 정원이 몇 명이에요?"}, {"role": "assistant", "content": "30명이에요."}]
+
+    await agent_loop.run_agent_loop("기숙사 신청은 언제 해요?", history=answered + [{"role": "user", "content": "교수님은 몇 분 계세요?"}])
+    after_unanswered = seen_last[0]
+    seen_last.clear()
+    await agent_loop.run_agent_loop("기숙사 신청은 언제 해요?", history=answered)
+
+    assert after_unanswered == "기숙사 신청은 언제 해요?" + ANSWERLESS_PREVIOUS_REMINDER + FOLLOW_UP_SEARCH_REMINDER
+    assert seen_last[0] == "기숙사 신청은 언제 해요?" + FOLLOW_UP_SEARCH_REMINDER
+
+
 async def test_custom_system_prompt_replaces_default(fake_mcp, monkeypatch):
     """[2026-10-29 B9] 개인 자격 질문은 main.py가 전용 프롬프트(ELIGIBILITY_PROMPT)를 넘김 — 넘긴 프롬프트가 기본 프롬프트
     대신 system 메시지로 들어가야 함. 안 넘기면(None) 지금까지처럼 기본 SYSTEM_PROMPT."""
@@ -325,9 +351,38 @@ async def test_long_history_keeps_only_most_recent_turns(fake_mcp, monkeypatch):
     await agent_loop.run_agent_loop("이번 질문", history=history)
 
     sent_history = seen[0][1:-1]  # [system, ...history..., 이번 질문]
-    assert sum(len(m["content"]) for m in sent_history) <= agent_loop.MAX_HISTORY_CHARS
-    assert sent_history[-1]["content"].startswith("답변9")  # 가장 최근 턴은 남아 있어야 함
-    assert sent_history[0]["role"] == "user"               # 질문/답변 짝이 깨지지 않게 user부터 시작
+    answers = [m for m in sent_history if m["role"] == "assistant"]
+    assert sum(len(m["content"]) for m in sent_history) <= agent_loop.MAX_HISTORY_CHARS + 10 * agent_loop.MAX_QUESTION_ONLY_CHARS
+    assert answers[-1]["content"].startswith("답변9")       # 가장 최근 턴은 남아 있어야 함
+    assert not any(m["content"].startswith("답변0") for m in answers)  # 오래된 답부터 빠짐
+    # (2026-11-13 B26) 넘친 오래된 턴도 질문은 짧게 남김 — "내가 처음 물어본 건?"·이어지는 말의 맥락은 질문이 가짐
+    assert sent_history[0]["role"] == "user" and sent_history[0]["content"].startswith("질문0")
+
+
+async def test_history_with_question_only_turns_keeps_each_answer_with_its_own_question(fake_mcp, monkeypatch):
+    """[2026-11-13 B26 버그 재현] 숏텀 메모리가 검토에 걸린 답을 빼고 질문만 남기면 [질문, 답] 2개씩이 아니게 됨.
+    전엔 메시지를 2개씩 묶어 잘라서, 길이가 넘치면 답 하나가 다른 질문에 붙은 채로 잘렸음. 질문 하나 + 그 뒤 답 하나를 한 턴으로 봐야 함."""
+    from db.memory_service import QUESTION_LIST_HEADER
+
+    history = [
+        {"role": "user", "content": QUESTION_LIST_HEADER + "\n1. 첫 질문"},
+        {"role": "user", "content": "오래된 질문"}, {"role": "assistant", "content": "오래된 답 " + "가" * 900},
+        {"role": "user", "content": "답이 빠진 질문"},
+        {"role": "user", "content": "최근 질문"}, {"role": "assistant", "content": "최근 답 " + "나" * 900},
+    ]
+    seen = _scripted_llm(monkeypatch, [{"role": "assistant", "content": "답변", "tool_calls": None}])
+
+    await agent_loop.run_agent_loop("이번 질문", history=history)
+
+    sent = seen[0][1:-1]
+    expected = [
+        ("user", QUESTION_LIST_HEADER),  # 앞 질문 목록은 길이가 넘쳐도 항상 남김(길이는 memory_service가 이미 묶어 둠)
+        ("user", "오래된 질문"),          # 넘친 턴 → 질문만
+        ("user", "답이 빠진 질문"),
+        ("user", "최근 질문"), ("assistant", "최근 답"),
+    ]
+    assert len(sent) == len(expected)
+    assert all(m["role"] == r and m["content"].startswith(c) for m, (r, c) in zip(sent, expected)), sent
 
 
 # ----- 3차 리뷰 2·3·5번 (2026-10-28) -----

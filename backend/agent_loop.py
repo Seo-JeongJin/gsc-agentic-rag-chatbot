@@ -16,8 +16,15 @@ import re
 
 import llm_client
 import mcp_client
+from db.memory_service import QUESTION_LIST_HEADER
 from syllable_check import odd_syllables
-from system_prompt import ESCALATION_CONTACT_MESSAGE, FOLLOW_UP_SEARCH_REMINDER, KOREAN_REWRITE_REQUEST, SYSTEM_PROMPT
+from system_prompt import (
+    ANSWERLESS_PREVIOUS_REMINDER,
+    ESCALATION_CONTACT_MESSAGE,
+    FOLLOW_UP_SEARCH_REMINDER,
+    KOREAN_REWRITE_REQUEST,
+    SYSTEM_PROMPT,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -33,6 +40,7 @@ _GROUNDING_FIELDS = ("chunk_text", "question_text", "answer_text")
 # 토큰이 아니라 글자 수로 재는 이유: 정확한 토큰 수는 Qwen 토크나이저가 있어야 알 수 있어서, 한국어 1글자 ≈ 1토큰으로
 # 넉넉하게(보수적으로) 잡음. 실제 사용량은 llm_client가 vLLM 응답의 prompt_tokens를 로그로 남기니 학교에서 보고 조정할 것.
 MAX_HISTORY_CHARS = 1500              # 이전 대화 전체(최근 턴부터 채움, 가장 최근 한 쌍은 길어도 잘라서 남김)
+MAX_QUESTION_ONLY_CHARS = 100          # (2026-11-13 B26) 상한을 넘은 오래된 턴은 질문만 이 길이로 남김(memory_service의 목록 질문 길이와 같음)
 MAX_TOOL_RESULT_CHARS_PER_CALL = 2500  # 검색 1번의 결과(JSON 포함) — 3차 리뷰 3번: 전엔 전체 예산을 첫 검색이 거의 다 써서
                                        # 두 번째 검색이 문서 한 건도 못 받았음 → 검색마다 따로 배정
                                        # (2026-11-04 실측 B19) 1500 → 2500: 1500자면 검색 결과 5개 중 3개만 가서 "입도선매 학비 50% 감면"
@@ -119,26 +127,58 @@ def _truncate(text: str, max_chars: int) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + _TRUNCATION_MARK
 
 
-def _trim_history(history: list[dict], max_chars: int = MAX_HISTORY_CHARS) -> list[dict]:
-    """이전 대화를 길이 상한 안으로 줄임 — 가장 최근 질문/답변 쌍부터 거꾸로 채우고, 넘치면 그보다 오래된 건 뺌.
-    짝(user→assistant) 단위로 자르는 이유: 질문만 남고 답이 빠지거나 그 반대면 LLM이 대화를 잘못 이해함.
+def _group_turns(history: list[dict]) -> list[list[dict]]:
+    """이전 대화를 턴(질문 하나 + 그 뒤에 온 답)으로 묶음. 답이 빠진 질문은 질문 하나짜리 턴.
+    (2026-11-13 B26) 전엔 메시지를 무조건 2개씩 묶었는데, 숏텀 메모리가 검토에 걸린 답을 빼고 질문만 남기면서 2개씩이 어긋남 —
+    다른 턴의 답이 엉뚱한 질문에 붙은 채로 잘렸음. 그래서 "user 메시지에서 새 턴이 시작된다"로 묶음."""
+    turns: list[list[dict]] = []
+    for message in history:
+        if message.get("role") == "user" or not turns:
+            turns.append([message])
+        else:
+            turns[-1].append(message)
+    return turns
 
-    가장 최근 한 쌍이 혼자 상한을 넘으면 통째로 버리지 않고 잘라서 남김(3차 리뷰 5번) — 전엔 긴 답변 바로 다음의
-    "그럼 그건요?" 같은 이어지는 질문이 이전 대화를 하나도 못 받아서 맥락을 잃었음. 질문 쪽은 짧게, 답변에 나머지를 줌."""
-    pairs = [history[i:i + 2] for i in range(0, len(history), 2)]
+
+def _trim_history(history: list[dict], max_chars: int = MAX_HISTORY_CHARS) -> list[dict]:
+    """이전 대화를 길이 상한 안으로 줄임 — 가장 최근 턴부터 거꾸로 채움.
+    턴 단위로 자르는 이유: 질문과 그 답이 서로 다른 턴과 섞이면 LLM이 대화를 잘못 이해함.
+
+    가장 최근 턴이 혼자 상한을 넘으면 통째로 버리지 않고 잘라서 남김(3차 리뷰 5번) — 전엔 긴 답변 바로 다음의
+    "그럼 그건요?" 같은 이어지는 질문이 이전 대화를 하나도 못 받아서 맥락을 잃었음. 질문 쪽은 짧게, 답변에 나머지를 줌.
+    (2026-11-13 B26) 상한을 넘은 오래된 턴은 통째로 버리지 않고 **질문만**(최대 MAX_QUESTION_ONLY_CHARS자) 남김 —
+    이어지는 말·"처음 물어본 건?"의 맥락은 질문이 갖고 있고, 질문은 짧아서 부담이 작음(숏텀 메모리 최근 턴은 5개뿐).
+    맨 앞의 "앞서 받은 질문 목록"(memory_service.QUESTION_LIST_HEADER)은 항상 남김 — 길이는 memory_service가 이미 묶어 둠."""
+    question_list: list[dict] = []
+    if history and history[0].get("role") == "user" and (history[0].get("content") or "").startswith(QUESTION_LIST_HEADER):
+        question_list, history = history[:1], history[1:]
+
     kept: list[list[dict]] = []
     used = 0
-    for pair in reversed(pairs):
-        size = sum(len(m.get("content") or "") for m in pair)
-        if used + size > max_chars:
-            if not kept:  # 가장 최근 한 쌍조차 안 들어감 → 잘라서라도 남김
-                question_budget = min(len(pair[0].get("content") or ""), max_chars // 3)
-                budgets = [question_budget, max_chars - question_budget][: len(pair)]
-                kept.append([{**m, "content": _truncate(m.get("content") or "", b)} for m, b in zip(pair, budgets)])
-            break
-        kept.append(pair)
+    overflowed = False
+    for turn in reversed(_group_turns(history)):
+        size = sum(len(m.get("content") or "") for m in turn)
+        if overflowed or used + size > max_chars:
+            if not kept:  # 가장 최근 턴조차 안 들어감 → 잘라서라도 남김
+                question_budget = min(len(turn[0].get("content") or ""), max_chars // 3)
+                budgets = [question_budget, max_chars - question_budget][: len(turn)]
+                kept.append([{**m, "content": _truncate(m.get("content") or "", b)} for m, b in zip(turn, budgets)])
+            elif turn[0].get("role") == "user":  # 넘친 오래된 턴 → 질문만 짧게
+                kept.append([{**turn[0], "content": _truncate(turn[0].get("content") or "", MAX_QUESTION_ONLY_CHARS)}])
+            overflowed = True  # 한 번 넘치면 그보다 오래된 턴은 전부 질문만(중간에 답이 다시 끼어들지 않게)
+            continue
+        kept.append(turn)
         used += size
-    return [m for pair in reversed(kept) for m in pair]
+    return question_list + [m for turn in reversed(kept) for m in turn]
+
+
+def _follow_up_reminders(history_used: list[dict], enabled: bool) -> str:
+    """이번 질문 뒤에 붙일 알림 글. 이전 대화가 없거나 알림을 끈 경로(CHAT)면 빈 문자열.
+    이전 대화가 답 없는 질문(user 메시지)으로 끝나면 ANSWERLESS_PREVIOUS_REMINDER를 먼저, 그다음 재검색 알림 — 실험(B26)과 같은 순서."""
+    if not history_used or not enabled:
+        return ""
+    answerless = ANSWERLESS_PREVIOUS_REMINDER if history_used[-1].get("role") == "user" else ""
+    return answerless + FOLLOW_UP_SEARCH_REMINDER
 
 
 def _fit_result_to_budget(result, remaining_chars: int):
@@ -302,8 +342,9 @@ async def run_agent_loop(
         [{"role": "system", "content": system_prompt or SYSTEM_PROMPT}]
         + (history_used := _trim_history(history))
         # 이전 대화가 있으면 질문 뒤에 재검색 알림을 붙임(2026-10-29 실측 B11 — system_prompt.FOLLOW_UP_SEARCH_REMINDER 참고).
+        # 이전 대화가 답 없는 질문으로 끝나면 그 앞에 알림 하나 더(2026-11-13 B26 — system_prompt.ANSWERLESS_PREVIOUS_REMINDER 참고).
         # LLM에 보내는 메시지에만 붙고, main.py가 DB 저장·출력 검토에 쓰는 질문은 원래 question_text 그대로.
-        + [{"role": "user", "content": question_text + (FOLLOW_UP_SEARCH_REMINDER if history_used and follow_up_reminder else "")}]
+        + [{"role": "user", "content": question_text + _follow_up_reminders(history_used, follow_up_reminder)}]
     )
 
     tool_call_count = 0
