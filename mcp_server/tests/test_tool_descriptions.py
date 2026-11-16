@@ -25,3 +25,14 @@ async def test_search_documents_description_covers_school_life():
 
     for topic in ["입학", "학비", "장학", "기숙사", "교육과정", "취업"]:
         assert topic in description, topic
+
+
+async def test_search_documents_description_covers_term_definitions():
+    """[2026-11-16 배포 후 B28 재현] "메가벤처가 뭐야?"·"입도선매가 뭐야?"를 정보 질문으로 보내도 실제 Qwen3가 단어 뜻은 상식이라며
+    검색하지 않고 "일반적으로 대규모 벤처기업"·"학과 용어가 아닌 것 같아요"라고 답함(검색 0/5). 괄호 목록에 "학과 안내에 나오는 용어의 뜻"을
+    넣었더니 용어·데이터셋 질문 13개 × 10번 검색 130/130(B3 기숙사와 같은 방법). 따로 문장으로 붙이면 동아리 질문 검색이 3/10으로 줄었음."""
+    description = await _description("search_documents")
+
+    assert "용어" in description and "뜻" in description
+    for term in ["메가벤처", "입도선매"]:
+        assert term in description, term

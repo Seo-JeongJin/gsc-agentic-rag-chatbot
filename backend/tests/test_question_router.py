@@ -27,6 +27,19 @@ def test_prompt_has_all_labels_and_the_latest_turn():
     assert "잘 모르는거야?" in prompt
 
 
+def test_prompt_sends_department_term_questions_to_info():
+    """[2026-11-16 배포 후 B28 재현] OOS 설명의 "일반 상식"에 걸려 "메가벤처가 뭐야?"·"입도선매가 뭐야?"가 범위 밖 고정 문구로 거절됨(각 10/10) —
+    메가벤처는 학과 소개 첫 문장의 핵심 용어. OOS 설명 끝에 "단, 학과 안내에 나오는 용어·이름의 뜻은 INFO" 예외를 둠
+    (용어 질문 60/120 → 100/120, 진짜 범위 밖 80/80 유지, 기존 발화 84개 × 3번 개인 자격 회귀 0).
+    같은 문장을 INFO 설명 쪽에 넣으면 예시 단어("JLPT") 때문에 "JLPT 3급 있는데 입도선매 돼요?"가 ELIG→INFO로 샘(3/12) — 위치 고정."""
+    prompt = _build_prompt("메가벤처가 뭐야?", [])
+    oos_part = prompt.split("- OOS:")[1].split("[바로 앞 대화]")[0]
+    info_part = prompt.split("- INFO:")[1].split("- ELIG:")[0]
+
+    assert "메가벤처" in oos_part and "INFO" in oos_part
+    assert "메가벤처" not in info_part
+
+
 def test_prompt_pairs_the_latest_question_with_its_own_answer():
     """[2026-11-13 B26 버그 재현] 숏텀 메모리가 검토에 걸린 답을 빼고 질문만 남기면, 전엔 "마지막 질문"과 "마지막 답"을 따로 찾아서
     서로 다른 턴의 질문·답이 짝지어졌음. 그 세션에선 아예 질문까지 빠져서 "총 몇 명이 달성했나요?"를 범위 밖(OOS)으로 골랐음(7/10).
