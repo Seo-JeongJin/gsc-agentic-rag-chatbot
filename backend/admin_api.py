@@ -23,6 +23,18 @@ from db.batch_analysis import (
 )
 from db.category_tagging import retag_etc_questions
 from llm_client import LLMError
+# 응답 모델(2026-11-26) — Swagger에 API마다 응답 칸이 보이게. 칸 목록은 schemas.py 설명 참고
+from schemas import (
+    AnalyzeResponse,
+    CategoryStat,
+    Insight,
+    MeResponse,
+    OverviewStats,
+    Proposal,
+    QuestionLog,
+    StatusResponse,
+    SuggestionResult,
+)
 
 # LLM 서버 실패 시 관리자 화면에 보여줄 안내 — 우리 코드 버그(500)가 아니라 "LLM 서버가 응답하지 않음"(502)이라는 뜻
 LLM_FAILURE_DETAIL = "LLM 서버가 응답하지 않아 분석하지 못했습니다. 잠시 후 다시 시도해 주세요."
@@ -77,7 +89,7 @@ async def require_admin(admin_session_token: str | None = Cookie(default=None)) 
     return admin_id
 
 
-@router.post("/login")
+@router.post("/login", response_model=StatusResponse)
 async def login_endpoint(payload: LoginRequest, request: Request, response: Response) -> dict:
     """아이디/비밀번호 확인 후, 성공하면 세션 토큰을 쿠키로 내려줌(HttpOnly — JS에서 못 읽게).
     실패하면 401 — 아이디가 없는 경우와 비밀번호가 틀린 경우를 구분하지 않음(정보 유출 방지).
@@ -107,7 +119,7 @@ async def login_endpoint(payload: LoginRequest, request: Request, response: Resp
     return {"status": "ok"}
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=StatusResponse)
 async def logout_endpoint(response: Response, admin_session_token: str | None = Cookie(default=None)) -> dict:
     """현재 세션 토큰을 DB에서 즉시 삭제하고, 브라우저 쿠키도 같이 지움."""
     if admin_session_token:
@@ -116,7 +128,7 @@ async def logout_endpoint(response: Response, admin_session_token: str | None = 
     return {"status": "ok"}
 
 
-@router.get("/me")
+@router.get("/me", response_model=MeResponse)
 async def me_endpoint(admin_id: int = Depends(require_admin)) -> dict:
     """로그인 상태 확인용 테스트 엔드포인트 — require_admin이 제대로 막아주는지 검증하는 목적.
     실제 대시보드 데이터 엔드포인트들도 전부 이 require_admin을 이렇게 가져다 쓰면 됨."""
@@ -126,7 +138,7 @@ async def me_endpoint(admin_id: int = Depends(require_admin)) -> dict:
 # ===== 아래부터는 조회 전용 대시보드 데이터 — 전부 LLM 호출 없이 순수 DB 조회/집계만 함 =====
 
 
-@router.get("/questions")
+@router.get("/questions", response_model=list[QuestionLog])
 async def questions_endpoint(
     limit: int = 50,
     offset: int = 0,
@@ -138,7 +150,7 @@ async def questions_endpoint(
     return await get_questions(limit=limit, offset=offset, needs_review=needs_review)
 
 
-@router.get("/stats/categories")
+@router.get("/stats/categories", response_model=list[CategoryStat])
 async def category_stats_endpoint(_admin_id: int = Depends(require_admin)) -> list[dict]:
     """카테고리(대/소분류)별 질문 수 집계 — categories 테이블 전체 기준이라 질문이 0건인
     카테고리도 빠짐없이 나옴(관리자가 카테고리 제안 승인/거절 시 지금 어떤 카테고리가 있는지
@@ -146,7 +158,7 @@ async def category_stats_endpoint(_admin_id: int = Depends(require_admin)) -> li
     return await get_category_stats()
 
 
-@router.get("/stats/overview")
+@router.get("/stats/overview", response_model=OverviewStats)
 async def overview_stats_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
     """세션/재방문율, 사용자평가, 미분류질문, 답변못한질문 — 요약 통계 한 번에.
     미분류 질문 수의 의미는 db/dashboard_service.py의 get_overview_stats 설명 참고."""
@@ -156,7 +168,7 @@ async def overview_stats_endpoint(_admin_id: int = Depends(require_admin)) -> di
 # ===== "로그 분석하기" — 여기서부터는 LLM을 호출함(분석 버튼 눌렀을 때만, 평소엔 저장된 것만 읽음) =====
 
 
-@router.post("/analyze")
+@router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
     """"로그 분석하기" 버튼이 호출. 지난 분석 이후 새로 생긴 "답변 못한 질문"이 있을 때만
     LLM을 호출해서 결과를 dashboard_insights에 새 행으로 저장하고, 없으면 LLM을 부르지 않고
@@ -168,14 +180,14 @@ async def analyze_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
         raise HTTPException(status_code=502, detail=LLM_FAILURE_DETAIL) from e
 
 
-@router.get("/insights")
+@router.get("/insights", response_model=Insight | None)
 async def latest_insight_endpoint(_admin_id: int = Depends(require_admin)) -> dict | None:
     """평소 대시보드 로딩 시 호출 — 저장된 분석 결과 중 최신 것만 읽음. LLM 호출 없음.
     아직 한 번도 분석 버튼을 안 눌렀으면 null 반환."""
     return await get_latest_insight()
 
 
-@router.get("/insights/history")
+@router.get("/insights/history", response_model=list[Insight])
 async def insight_history_endpoint(
     limit: int = 20,
     _admin_id: int = Depends(require_admin),
@@ -188,7 +200,8 @@ async def insight_history_endpoint(
 # 질문)와 "신규 데이터 있는지" 판단 기준이 서로 달라서 하나로 합치지 않음(261021_구현스펙.md 참고) =====
 
 
-@router.post("/category-suggestions/analyze")
+# response_model_exclude_none: 결과 모양이 status마다 달라서, 해당 없는 칸(None)은 빼고 내보냄(schemas.SuggestionResult 설명)
+@router.post("/category-suggestions/analyze", response_model=SuggestionResult, response_model_exclude_none=True)
 async def category_suggestions_analyze_endpoint(_admin_id: int = Depends(require_admin)) -> dict:
     """"카테고리 제안 확인하기" 버튼이 호출. 기타로 분류된 질문이 너무 적으면 LLM 호출
     자체를 안 하고 바로 반환(run_category_suggestion 내부의 임계치 체크). LLM 서버가 실패하면 502."""
@@ -198,13 +211,13 @@ async def category_suggestions_analyze_endpoint(_admin_id: int = Depends(require
         raise HTTPException(status_code=502, detail=LLM_FAILURE_DETAIL) from e
 
 
-@router.get("/category-suggestions")
+@router.get("/category-suggestions", response_model=list[Proposal])
 async def category_suggestions_endpoint(_admin_id: int = Depends(require_admin)) -> list[dict]:
     """대기 중(pending)인 카테고리 제안 목록 — 승인/거절 전까지 여기 남아있음. LLM 호출 없음."""
     return await get_pending_proposals()
 
 
-@router.post("/category-suggestions/{proposal_id}/approve")
+@router.post("/category-suggestions/{proposal_id}/approve", response_model=Proposal)
 async def approve_category_suggestion_endpoint(
     proposal_id: int, background_tasks: BackgroundTasks, _admin_id: int = Depends(require_admin)
 ) -> dict:
@@ -219,7 +232,7 @@ async def approve_category_suggestion_endpoint(
     return proposal
 
 
-@router.post("/category-suggestions/{proposal_id}/reject")
+@router.post("/category-suggestions/{proposal_id}/reject", response_model=Proposal)
 async def reject_category_suggestion_endpoint(
     proposal_id: int, _admin_id: int = Depends(require_admin)
 ) -> dict:

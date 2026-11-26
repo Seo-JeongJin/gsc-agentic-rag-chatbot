@@ -27,6 +27,7 @@ from db.session_service import process_session, reset_conversation
 from llm_client import LLMError
 from output_guardrail import build_grounded_context, find_unsupported_numbers, review_answer
 from question_router import CHAT, ELIG, META, OOS, classify_intent
+from schemas import StatusResponse  # 응답 모델(2026-11-26) — Swagger에 응답 칸이 보이게(schemas.py 설명 참고)
 from system_prompt import CHAT_PROMPT, ELIGIBILITY_PROMPT, META_RESPONSE, OOS_RESPONSE
 
 # uvicorn 로그에 같이 찍히도록 uvicorn의 로거를 씀
@@ -110,7 +111,7 @@ class RateRequest(BaseModel):
     session_id: str
 
 
-@app.post("/api/reset_conversation")
+@app.post("/api/reset_conversation", response_model=StatusResponse)
 async def reset_conversation_endpoint(payload: ResetRequest) -> dict:
     """프론트의 "새 대화 시작" 버튼이 호출. session_id(재방문자 기록)는 그대로 두고,
     대화 리셋 시각만 갱신 — 이후 fetch_recent_history가 이 시점 이전 대화를 숏텀메모리로 안 가져옴."""
@@ -118,7 +119,7 @@ async def reset_conversation_endpoint(payload: ResetRequest) -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/rate")
+@app.post("/api/rate", response_model=StatusResponse)
 async def rate_endpoint(payload: RateRequest) -> dict:
     """프론트의 평가(👍/👎) 버튼이 호출. questions.user_rating을 갱신.
 
